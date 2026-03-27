@@ -430,6 +430,8 @@ class GatewayLogger:
         host_id: Optional[str] = None,
         endpoint_id: Optional[str] = None,
     ) -> List[dict]:
+        await self._flush_all()
+
         try:
             pool = db_pool()
         except RuntimeError:
@@ -485,6 +487,8 @@ class GatewayLogger:
         types: Optional[List[str]] = None,
         endpoint_id: Optional[str] = None,
     ) -> List[dict]:
+        await self._flush_all()
+
         try:
             pool = db_pool()
         except RuntimeError:
