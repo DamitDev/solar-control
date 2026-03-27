@@ -97,6 +97,39 @@ async def get_stats(
     for r in model_rows:
         r.pop("dur_sum", None)
 
+    by_host: Dict[str, Dict[str, Any]] = {}
+    for s in summaries:
+        hid = s.get("host_id")
+        if not hid:
+            continue
+        rec = by_host.setdefault(
+            hid,
+            {
+                "host_id": hid,
+                "host_name": s.get("host_name") or hid,
+                "completed": 0,
+                "token_in": 0,
+                "token_out": 0,
+                "dur_sum": 0.0,
+            },
+        )
+        if not rec["host_name"] or rec["host_name"] == hid:
+            rec["host_name"] = s.get("host_name") or hid
+        rec["completed"] += 1
+        if isinstance(s.get("prompt_tokens"), (int, float)):
+            rec["token_in"] += int(s["prompt_tokens"])
+        if isinstance(s.get("completion_tokens"), (int, float)):
+            rec["token_out"] += int(s["completion_tokens"])
+        if isinstance(s.get("duration_s"), (int, float)):
+            rec["dur_sum"] += float(s["duration_s"])
+
+    host_rows = [
+        {**v, "avg_duration_s": v["dur_sum"] / v["completed"] if v["completed"] else 0}
+        for v in by_host.values()
+    ]
+    for r in host_rows:
+        r.pop("dur_sum", None)
+
     return {
         "from": start.isoformat(),
         "to": end.isoformat(),
@@ -109,6 +142,7 @@ async def get_stats(
         "avg_tokens_in": (token_in_total / len(p_vals)) if p_vals else 0,
         "avg_tokens_out": (token_out_total / len(c_vals)) if c_vals else 0,
         "models": model_rows,
+        "hosts": host_rows,
     }
 
 
