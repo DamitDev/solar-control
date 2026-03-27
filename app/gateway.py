@@ -106,7 +106,10 @@ class OpenAIGateway:
                     ) as response:
                         if response.status == 200:
                             instances = await response.json()
+                            prev_status = host.status
                             await host_db.update_host_status(host.id, HostStatus.ONLINE)
+                            if prev_status != HostStatus.ONLINE:
+                                await self._notify_host_online(host)
                             for instance in instances:
                                 if instance.get("status") == "running":
                                     alias = instance["config"]["alias"]
@@ -138,7 +141,37 @@ class OpenAIGateway:
                         else:
                             await host_db.update_host_status(host.id, HostStatus.ERROR)
                 except Exception:
-                    await host_db.update_host_status(host.id, HostStatus.OFFLINE)
+                    cached = await get_host_instances(host.id)
+                    if cached:
+                        for instance in cached:
+                            if instance.get("status") == "running":
+                                alias = instance.get("alias", "unknown")
+                                port = instance.get("port")
+                                if not port:
+                                    continue
+                                host_base = host.url.rsplit(":", 1)[0]
+                                instance_url = f"{host_base}:{port}"
+                                entry = {
+                                    "host_id": host.id,
+                                    "instance_id": instance["id"],
+                                    "url": instance_url,
+                                    "api_key": host.api_key,
+                                    "model_alias": alias,
+                                    "supported_endpoints": instance.get(
+                                        "supported_endpoints",
+                                        [
+                                            "/v1/chat/completions",
+                                            "/v1/completions",
+                                            "/v1/models",
+                                        ],
+                                    ),
+                                    "backend_type": instance.get(
+                                        "backend_type", "llamacpp"
+                                    ),
+                                }
+                                result_entries.append((alias, entry))
+                    else:
+                        await host_db.update_host_status(host.id, HostStatus.OFFLINE)
                 return result_entries
 
             results = await asyncio.gather(
@@ -152,6 +185,35 @@ class OpenAIGateway:
 
         # Store in Redis
         await registry_store.set_registry(dict(new_model_map))
+
+    async def _notify_host_online(self, host):
+        """Emit host_status to WebUI when HTTP polling discovers a host is online."""
+        from app.socketio_app.server import sio
+
+        try:
+            refreshed = await host_db.get_host(host.id)
+            h = refreshed or host
+            await sio.emit(
+                "host_status",
+                {
+                    "host_id": h.id,
+                    "name": h.name,
+                    "status": "online",
+                    "url": h.url,
+                    "memory": h.memory.model_dump() if h.memory else None,
+                    "gpu_type": h.gpu_type,
+                    "roles": h.roles,
+                    "disk_total_gb": h.disk_total_gb,
+                    "disk_used_gb": h.disk_used_gb,
+                    "disk_available_gb": h.disk_available_gb,
+                    "memory_available_gb": h.memory_available_gb,
+                    "connected": False,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                namespace="/webui",
+            )
+        except Exception as e:
+            logger.debug("Failed to notify WebUI of host online: %s", e)
 
     # -------------------------
     # Background tasks

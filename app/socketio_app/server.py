@@ -12,6 +12,8 @@ sio = socketio.AsyncServer(
     cors_allowed_origins="*",
     logger=False,
     engineio_logger=False,
+    ping_interval=25,
+    ping_timeout=60,
 )
 
 sio_app = socketio.ASGIApp(sio, socketio_path="socket.io")

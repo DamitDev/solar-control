@@ -36,7 +36,6 @@ class HostConnectionStore:
             pipe = r.pipeline()
             pipe.hdel(SID_MAP, sid)
             pipe.hdel(CONNECTED_MAP, host_id)
-            pipe.hdel(INSTANCES_MAP, host_id)
             await pipe.execute()
         else:
             await r.hdel(SID_MAP, sid)

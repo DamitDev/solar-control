@@ -384,6 +384,70 @@ async def host_log(sid: str, data: dict):
     )
 
 
+@sio.on("log_batch", namespace="/hosts")
+async def host_log_batch(sid: str, data: dict):
+    """Handle batched log entries from a host."""
+    host_id = await host_store.get_host_id_for_sid(sid)
+    if not host_id:
+        return
+
+    entries = data.get("entries", [])
+    if not entries:
+        return
+
+    host = await host_db.get_host(host_id)
+    host_name = host.name if host else None
+
+    for entry in entries:
+        await sio.emit(
+            "log",
+            {
+                "host_id": host_id,
+                "host_name": host_name,
+                "instance_id": entry.get("instance_id"),
+                "timestamp": entry.get(
+                    "timestamp", datetime.now(timezone.utc).isoformat()
+                ),
+                "data": {
+                    "seq": entry.get("seq"),
+                    "line": entry.get("line"),
+                    "level": entry.get("level", "info"),
+                },
+            },
+            namespace="/webui",
+        )
+
+
+@sio.on("instance_state_batch", namespace="/hosts")
+async def host_instance_state_batch(sid: str, data: dict):
+    """Handle batched instance state updates from a host."""
+    host_id = await host_store.get_host_id_for_sid(sid)
+    if not host_id:
+        return
+
+    entries = data.get("entries", [])
+    if not entries:
+        return
+
+    host = await host_db.get_host(host_id)
+    host_name = host.name if host else None
+
+    for entry in entries:
+        await sio.emit(
+            "instance_state",
+            {
+                "host_id": host_id,
+                "host_name": host_name,
+                "instance_id": entry.get("instance_id"),
+                "timestamp": entry.get(
+                    "timestamp", datetime.now(timezone.utc).isoformat()
+                ),
+                "data": entry.get("data", entry),
+            },
+            namespace="/webui",
+        )
+
+
 @sio.on("host_health", namespace="/hosts")
 async def host_health(sid: str, data: dict):
     host_id = await host_store.get_host_id_for_sid(sid)
