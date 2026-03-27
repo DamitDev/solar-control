@@ -15,6 +15,7 @@ INSTANCES_MAP = "solar:hosts:instances"  # hash: host_id -> json instances
 
 PENDING_MAP = "solar:hosts:pending"  # hash: pending_id -> json data
 PENDING_SID_MAP = "solar:hosts:pending_sids"  # hash: sid -> pending_id
+PENDING_KEY_MAP = "solar:hosts:pending_keys"  # hash: api_key -> pending_id
 
 
 class HostConnectionStore:
@@ -22,24 +23,46 @@ class HostConnectionStore:
 
     # ── Active hosts ──
 
-    async def register_host(self, sid: str, host_id: str) -> None:
+    async def register_host(self, sid: str, host_id: str) -> Optional[str]:
+        """Register a host connection, cleaning up any stale session.
+
+        Returns the old sid if the host was already connected under a
+        different sid (caller should disconnect it), or None.
+        """
         r = redis_client()
+        old_sid = await r.hget(CONNECTED_MAP, host_id)
+
         pipe = r.pipeline()
+        if old_sid and old_sid != sid:
+            pipe.hdel(SID_MAP, old_sid)
         pipe.hset(SID_MAP, sid, host_id)
         pipe.hset(CONNECTED_MAP, host_id, sid)
         await pipe.execute()
 
+        return old_sid if old_sid and old_sid != sid else None
+
     async def unregister_host_by_sid(self, sid: str) -> Optional[str]:
+        """Remove a host connection by sid.
+
+        Only clears CONNECTED_MAP when *this* sid is still the active one
+        for the host, preventing a stale disconnect from corrupting a newer
+        connection.  Returns host_id only when this was the active session
+        (so the caller knows to run the offline workflow).
+        """
         r = redis_client()
         host_id = await r.hget(SID_MAP, sid)
-        if host_id:
-            pipe = r.pipeline()
-            pipe.hdel(SID_MAP, sid)
-            pipe.hdel(CONNECTED_MAP, host_id)
-            await pipe.execute()
-        else:
+        if not host_id:
             await r.hdel(SID_MAP, sid)
-        return host_id
+            return None
+
+        current_sid = await r.hget(CONNECTED_MAP, host_id)
+        pipe = r.pipeline()
+        pipe.hdel(SID_MAP, sid)
+        if current_sid == sid:
+            pipe.hdel(CONNECTED_MAP, host_id)
+        await pipe.execute()
+
+        return host_id if current_sid == sid else None
 
     async def get_host_id_for_sid(self, sid: str) -> Optional[str]:
         r = redis_client()
@@ -72,12 +95,40 @@ class HostConnectionStore:
 
     # ── Pending hosts ──
 
-    async def add_pending(self, pending_id: str, sid: str, data: dict) -> None:
+    async def add_pending(self, pending_id: str, sid: str, data: dict) -> Optional[str]:
+        """Add a pending host entry, deduplicating by API key.
+
+        If a pending entry already exists for the same api_key, it is
+        replaced by the new one (the latest connection supersedes).
+        Returns the old pending_id that was replaced, or None.
+        """
         r = redis_client()
+        api_key = data.get("api_key", "")
+
+        old_pending_id: Optional[str] = None
+        if api_key:
+            old_pending_id = await r.hget(PENDING_KEY_MAP, api_key)
+
+        old_sid: Optional[str] = None
+        if old_pending_id and old_pending_id != pending_id:
+            old_raw = await r.hget(PENDING_MAP, old_pending_id)
+            if old_raw:
+                old_sid = json.loads(old_raw).get("sid")
+
         pipe = r.pipeline()
+        if old_pending_id and old_pending_id != pending_id:
+            pipe.hdel(PENDING_MAP, old_pending_id)
+        if old_sid:
+            pipe.hdel(PENDING_SID_MAP, old_sid)
         pipe.hset(PENDING_MAP, pending_id, json.dumps(data))
         pipe.hset(PENDING_SID_MAP, sid, pending_id)
+        if api_key:
+            pipe.hset(PENDING_KEY_MAP, api_key, pending_id)
         await pipe.execute()
+
+        return (
+            old_pending_id if old_pending_id and old_pending_id != pending_id else None
+        )
 
     async def get_pending(self, pending_id: str) -> Optional[dict]:
         r = redis_client()
@@ -102,21 +153,33 @@ class HostConnectionStore:
             return None
         data = json.loads(raw)
         sid = data.get("sid")
+        api_key = data.get("api_key")
         pipe = r.pipeline()
         pipe.hdel(PENDING_MAP, pending_id)
         if sid:
             pipe.hdel(PENDING_SID_MAP, sid)
+        if api_key:
+            pipe.hdel(PENDING_KEY_MAP, api_key)
         await pipe.execute()
         return data
 
     async def remove_pending_by_sid(self, sid: str) -> Optional[str]:
         r = redis_client()
         pending_id = await r.hget(PENDING_SID_MAP, sid)
-        if pending_id:
-            pipe = r.pipeline()
-            pipe.hdel(PENDING_SID_MAP, sid)
-            pipe.hdel(PENDING_MAP, pending_id)
-            await pipe.execute()
+        if not pending_id:
+            return None
+
+        api_key: Optional[str] = None
+        raw = await r.hget(PENDING_MAP, pending_id)
+        if raw:
+            api_key = json.loads(raw).get("api_key")
+
+        pipe = r.pipeline()
+        pipe.hdel(PENDING_SID_MAP, sid)
+        pipe.hdel(PENDING_MAP, pending_id)
+        if api_key:
+            pipe.hdel(PENDING_KEY_MAP, api_key)
+        await pipe.execute()
         return pending_id
 
     async def update_pending(self, pending_id: str, data: dict) -> None:

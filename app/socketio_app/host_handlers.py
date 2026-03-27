@@ -168,9 +168,23 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
     host = await host_db.get_host_by_api_key(api_key)
 
     if host:
-        await host_store.register_host(sid, host.id)
+        old_sid = await host_store.register_host(sid, host.id)
+        if old_sid:
+            logger.info(
+                "Host '%s' (%s) reconnected [new_sid=%s, stale_sid=%s]",
+                host.name,
+                host.id,
+                sid,
+                old_sid,
+            )
+            try:
+                await sio.disconnect(old_sid, namespace="/hosts")
+            except Exception:
+                pass
+        else:
+            logger.info("Host '%s' (%s) connected [sid=%s]", host.name, host.id, sid)
+
         await host_db.update_host_status(host.id, HostStatus.ONLINE)
-        logger.info("Host '%s' (%s) connected [sid=%s]", host.name, host.id, sid)
 
         await sio.emit(
             "registration_ack",
@@ -212,11 +226,27 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
             "instances": [],
             "connected_at": datetime.now(timezone.utc).isoformat(),
         }
-        await host_store.add_pending(pending_id, sid, pending_data)
+        old_pending_id = await host_store.add_pending(pending_id, sid, pending_data)
 
-        logger.info(
-            "Host %s connected with unknown key -> pending (id=%s)", sid, pending_id
-        )
+        if old_pending_id:
+            logger.info(
+                "Host %s reconnected with unknown key -> pending replaced "
+                "(old=%s, new=%s)",
+                sid,
+                old_pending_id,
+                pending_id,
+            )
+            await sio.emit(
+                "host_pending_removed",
+                {"pending_id": old_pending_id},
+                namespace="/webui",
+            )
+        else:
+            logger.info(
+                "Host %s connected with unknown key -> pending (id=%s)",
+                sid,
+                pending_id,
+            )
 
         await sio.emit(
             "pending",
