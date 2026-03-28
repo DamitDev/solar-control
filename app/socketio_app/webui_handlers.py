@@ -9,11 +9,12 @@ Features:
 """
 
 import logging
-from typing import Optional
+from typing import Any
 
 from .server import sio
 from app.config import settings
 from app.database.hosts import host_db
+from app.models.socketio import HostStatusPayload, InstancesUpdatePayload
 from app.socketio_app.host_handlers import (
     is_host_connected,
     get_pending_hosts,
@@ -24,7 +25,7 @@ from app.socketio_app.host_handlers import (
 logger = logging.getLogger(__name__)
 
 
-def _extract_key_from_environ(environ: dict) -> Optional[str]:
+def _extract_key_from_environ(environ: dict[str, Any]) -> str | None:
     """Extract API key from ASGI scope headers (set by reverse proxy)."""
     for name, value in environ.get("headers", []):
         header = (
@@ -39,7 +40,9 @@ def _extract_key_from_environ(environ: dict) -> Optional[str]:
 
 
 @sio.on("connect", namespace="/webui")
-async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
+async def webui_connect(
+    sid: str, environ: dict[str, Any], auth: dict[str, Any] | None = None
+):
     """Authenticate WebUI client and send initial state."""
     api_key = (auth or {}).get("api_key") or _extract_key_from_environ(environ)
     if api_key != settings.management_api_key:
@@ -49,35 +52,20 @@ async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
     logger.info("WebUI client connected [sid=%s]", sid)
 
     hosts = await host_db.get_all_hosts()
-    initial = []
+    initial: list[dict[str, Any]] = []
     for h in hosts:
-        initial.append(
-            {
-                "host_id": h.id,
-                "name": h.name,
-                "status": h.status.value,
-                "url": h.url,
-                "last_seen": h.last_seen.isoformat() if h.last_seen else None,
-                "memory": h.memory.model_dump() if h.memory else None,
-                "gpu_type": h.gpu_type,
-                "roles": h.roles,
-                "disk_total_gb": h.disk_total_gb,
-                "disk_used_gb": h.disk_used_gb,
-                "disk_available_gb": h.disk_available_gb,
-                "memory_available_gb": h.memory_available_gb,
-                "connected": await is_host_connected(h.id),
-            }
+        payload = HostStatusPayload.from_host(
+            h, connected=await is_host_connected(h.id)
         )
+        initial.append(payload.model_dump())
     await sio.emit("initial_status", initial, to=sid, namespace="/webui")
 
     for hid in await get_connected_host_ids():
         instances = await get_host_instances(hid)
         if instances:
+            payload = InstancesUpdatePayload(host_id=hid, instances=instances)
             await sio.emit(
-                "instances_update",
-                {"host_id": hid, "instances": instances},
-                to=sid,
-                namespace="/webui",
+                "instances_update", payload.model_dump(), to=sid, namespace="/webui"
             )
 
     pending = await get_pending_hosts()
@@ -91,14 +79,8 @@ async def webui_disconnect(sid: str):
 
 
 @sio.on("set_filter", namespace="/webui")
-async def webui_set_filter(sid: str, filter_config: dict):
-    """Update the client's event filter.
-
-    With Socket.IO rooms, we could use room-based filtering for more efficiency,
-    but for now we store the filter per-session and filter server-side on emit.
-    The Redis adapter ensures all replicas can emit to this client.
-    """
-    # Store filter in session data
+async def webui_set_filter(sid: str, filter_config: dict[str, Any]):
+    """Update the client's event filter."""
     async with sio.session(sid, namespace="/webui") as session:
         session["filter"] = filter_config
 
@@ -110,14 +92,11 @@ async def webui_set_filter(sid: str, filter_config: dict):
     )
 
 
-async def broadcast_to_webui(event: str, data: dict):
-    """Helper to emit events to all WebUI clients.
-
-    The Redis adapter ensures this reaches clients on all replicas.
-    """
+async def broadcast_to_webui(event: str, data: dict[str, Any]) -> None:
+    """Helper to emit events to all WebUI clients."""
     await sio.emit(event, data, namespace="/webui")
 
 
-async def broadcast_gateway_request(summary_data: dict):
+async def broadcast_gateway_request(summary_data: dict[str, Any]) -> None:
     """Broadcast a completed gateway request summary to WebUI clients."""
     await sio.emit("gateway_request", summary_data, namespace="/webui")

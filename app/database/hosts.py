@@ -1,253 +1,196 @@
-"""PostgreSQL-backed host CRUD operations.
+"""PostgreSQL-backed host CRUD operations using SQLAlchemy ORM."""
 
-Replaces the file-based HostManager that used hosts.json.
-"""
-
-import json
+from typing import Any
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+
+from sqlalchemy import select, delete, update
 
 from app.models import Host, HostStatus, MemoryInfo
-from .connection import db_pool
+from .connection import get_session_factory
+from .tables import HostRow
 
 
 class HostDB:
     """Database-backed host management."""
 
+    def _session(self):
+        return get_session_factory()()
+
+    def _row_to_host(self, row: HostRow) -> Host:
+        memory = None
+        if row.memory and isinstance(row.memory, dict):
+            memory = MemoryInfo(**row.memory)
+
+        roles: list[str] = []
+        if isinstance(row.roles, list):
+            roles = row.roles
+
+        return Host(
+            id=row.id,
+            name=row.name,
+            url=row.url,
+            api_key=row.api_key,
+            status=HostStatus(row.status),
+            last_seen=row.last_seen,
+            memory=memory,
+            gpu_type=row.gpu_type,
+            roles=roles,
+            disk_total_gb=row.disk_total_gb,
+            disk_used_gb=row.disk_used_gb,
+            disk_available_gb=row.disk_available_gb,
+            memory_available_gb=row.memory_available_gb,
+            created_at=row.created_at,
+        )
+
+    def _host_to_dict(self, host: Host) -> dict[str, Any]:
+        return {
+            "id": host.id,
+            "name": host.name,
+            "url": host.url,
+            "api_key": host.api_key,
+            "status": host.status.value,
+            "last_seen": host.last_seen,
+            "memory": host.memory.model_dump() if host.memory else None,
+            "gpu_type": host.gpu_type,
+            "roles": host.roles or [],
+            "disk_total_gb": host.disk_total_gb,
+            "disk_used_gb": host.disk_used_gb,
+            "disk_available_gb": host.disk_available_gb,
+            "memory_available_gb": host.memory_available_gb,
+            "created_at": host.created_at,
+        }
+
     async def add_host(self, host: Host) -> Host:
-        pool = db_pool()
-        memory_json = json.dumps(host.memory.model_dump()) if host.memory else None
-        roles_json = json.dumps(host.roles) if host.roles else "[]"
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO hosts (id, name, url, api_key, status, last_seen, memory,
-                       gpu_type, roles, disk_total_gb, disk_used_gb, disk_available_gb,
-                       memory_available_gb, created_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb,
-                       $10, $11, $12, $13, $14)
-                   ON CONFLICT (id) DO UPDATE SET
-                       name = EXCLUDED.name,
-                       url = EXCLUDED.url,
-                       api_key = EXCLUDED.api_key,
-                       status = EXCLUDED.status,
-                       last_seen = EXCLUDED.last_seen,
-                       memory = EXCLUDED.memory,
-                       gpu_type = EXCLUDED.gpu_type,
-                       roles = EXCLUDED.roles,
-                       disk_total_gb = EXCLUDED.disk_total_gb,
-                       disk_used_gb = EXCLUDED.disk_used_gb,
-                       disk_available_gb = EXCLUDED.disk_available_gb,
-                       memory_available_gb = EXCLUDED.memory_available_gb""",
-                host.id,
-                host.name,
-                host.url,
-                host.api_key,
-                host.status.value,
-                host.last_seen,
-                memory_json,
-                host.gpu_type,
-                roles_json,
-                host.disk_total_gb,
-                host.disk_used_gb,
-                host.disk_available_gb,
-                host.memory_available_gb,
-                host.created_at,
-            )
+        async with self._session() as session:
+            existing = await session.get(HostRow, host.id)
+            if existing:
+                values = self._host_to_dict(host)
+                values.pop("id")
+                values.pop("created_at")
+                await session.execute(
+                    update(HostRow).where(HostRow.id == host.id).values(**values)
+                )
+            else:
+                session.add(HostRow(**self._host_to_dict(host)))
+            await session.commit()
         return host
 
     async def remove_host(self, host_id: str) -> bool:
-        pool = db_pool()
-        async with pool.acquire() as conn:
-            result = await conn.execute("DELETE FROM hosts WHERE id = $1", host_id)
-        return result == "DELETE 1"
+        async with self._session() as session:
+            result = await session.execute(delete(HostRow).where(HostRow.id == host_id))
+            await session.commit()
+            return result.rowcount == 1
 
-    async def get_host(self, host_id: str) -> Optional[Host]:
-        pool = db_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM hosts WHERE id = $1", host_id)
-        if not row:
-            return None
-        return self._row_to_host(row)
+    async def get_host(self, host_id: str) -> Host | None:
+        async with self._session() as session:
+            row = await session.get(HostRow, host_id)
+            return self._row_to_host(row) if row else None
 
-    async def get_host_by_api_key(self, api_key: str) -> Optional[Host]:
-        pool = db_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM hosts WHERE api_key = $1", api_key)
-        if not row:
-            return None
-        return self._row_to_host(row)
+    async def get_host_by_api_key(self, api_key: str) -> Host | None:
+        async with self._session() as session:
+            result = await session.execute(
+                select(HostRow).where(HostRow.api_key == api_key)
+            )
+            row = result.scalar_one_or_none()
+            return self._row_to_host(row) if row else None
 
-    async def get_all_hosts(self, *, role: Optional[str] = None) -> List[Host]:
-        pool = db_pool()
-        async with pool.acquire() as conn:
+    async def get_all_hosts(self, *, role: str | None = None) -> list[Host]:
+        async with self._session() as session:
+            stmt = select(HostRow).order_by(HostRow.created_at)
             if role:
-                rows = await conn.fetch(
-                    "SELECT * FROM hosts WHERE roles @> $1::jsonb ORDER BY created_at",
-                    json.dumps([role]),
-                )
-            else:
-                rows = await conn.fetch("SELECT * FROM hosts ORDER BY created_at")
-        return [self._row_to_host(row) for row in rows]
+                stmt = stmt.where(HostRow.roles.op("@>")(f'["{role}"]'))
+            result = await session.execute(stmt)
+            return [self._row_to_host(row) for row in result.scalars()]
 
     async def update_host_status(
         self,
         host_id: str,
         status: HostStatus,
         *,
-        memory: Optional[Dict[str, Any]] = None,
+        memory: dict[str, Any] | None = None,
     ) -> bool:
-        pool = db_pool()
-        now = datetime.now(timezone.utc) if status == HostStatus.ONLINE else None
-        memory_json = json.dumps(memory) if memory else None
+        values: dict[str, Any] = {"status": status.value}
+        if status == HostStatus.ONLINE:
+            values["last_seen"] = datetime.now(timezone.utc)
+        if memory is not None:
+            values["memory"] = memory
 
-        async with pool.acquire() as conn:
-            if memory_json is not None and now is not None:
-                result = await conn.execute(
-                    "UPDATE hosts SET status = $2, last_seen = $3, memory = $4::jsonb WHERE id = $1",
-                    host_id,
-                    status.value,
-                    now,
-                    memory_json,
-                )
-            elif now is not None:
-                result = await conn.execute(
-                    "UPDATE hosts SET status = $2, last_seen = $3 WHERE id = $1",
-                    host_id,
-                    status.value,
-                    now,
-                )
-            else:
-                result = await conn.execute(
-                    "UPDATE hosts SET status = $2 WHERE id = $1",
-                    host_id,
-                    status.value,
-                )
-        return result == "UPDATE 1"
+        async with self._session() as session:
+            result = await session.execute(
+                update(HostRow).where(HostRow.id == host_id).values(**values)
+            )
+            await session.commit()
+            return result.rowcount == 1
 
     async def update_host_memory(
         self,
         host_id: str,
-        memory: Dict[str, Any],
+        memory: dict[str, Any],
         *,
-        gpu_type: Optional[str] = None,
-        disk_total_gb: Optional[float] = None,
-        disk_used_gb: Optional[float] = None,
-        disk_available_gb: Optional[float] = None,
+        gpu_type: str | None = None,
+        disk_total_gb: float | None = None,
+        disk_used_gb: float | None = None,
+        disk_available_gb: float | None = None,
     ) -> bool:
-        pool = db_pool()
-        now = datetime.now(timezone.utc)
-        memory_available_gb = memory.get("available_gb") if memory else None
-
-        sets = ["memory = $2::jsonb", "last_seen = $3", "memory_available_gb = $4"]
-        params: list = [host_id, json.dumps(memory), now, memory_available_gb]
-        idx = 5
-
+        values: dict[str, Any] = {
+            "memory": memory,
+            "last_seen": datetime.now(timezone.utc),
+            "memory_available_gb": memory.get("available_gb"),
+        }
         if gpu_type is not None:
-            sets.append(f"gpu_type = ${idx}")
-            params.append(gpu_type)
-            idx += 1
+            values["gpu_type"] = gpu_type
         if disk_total_gb is not None:
-            sets.append(f"disk_total_gb = ${idx}")
-            params.append(disk_total_gb)
-            idx += 1
+            values["disk_total_gb"] = disk_total_gb
         if disk_used_gb is not None:
-            sets.append(f"disk_used_gb = ${idx}")
-            params.append(disk_used_gb)
-            idx += 1
+            values["disk_used_gb"] = disk_used_gb
         if disk_available_gb is not None:
-            sets.append(f"disk_available_gb = ${idx}")
-            params.append(disk_available_gb)
-            idx += 1
+            values["disk_available_gb"] = disk_available_gb
 
-        sql = f"UPDATE hosts SET {', '.join(sets)} WHERE id = $1"
-        async with pool.acquire() as conn:
-            result = await conn.execute(sql, *params)
-        return result == "UPDATE 1"
+        async with self._session() as session:
+            result = await session.execute(
+                update(HostRow).where(HostRow.id == host_id).values(**values)
+            )
+            await session.commit()
+            return result.rowcount == 1
 
     async def update_host_gpu_type(self, host_id: str, gpu_type: str) -> bool:
-        pool = db_pool()
-        async with pool.acquire() as conn:
-            result = await conn.execute(
-                "UPDATE hosts SET gpu_type = $2 WHERE id = $1",
-                host_id,
-                gpu_type,
+        async with self._session() as session:
+            result = await session.execute(
+                update(HostRow).where(HostRow.id == host_id).values(gpu_type=gpu_type)
             )
-        return result == "UPDATE 1"
+            await session.commit()
+            return result.rowcount == 1
 
-    async def update_host_roles(self, host_id: str, roles: list) -> bool:
-        pool = db_pool()
-        async with pool.acquire() as conn:
-            result = await conn.execute(
-                "UPDATE hosts SET roles = $2::jsonb WHERE id = $1",
-                host_id,
-                json.dumps(roles),
+    async def update_host_roles(self, host_id: str, roles: list[str]) -> bool:
+        async with self._session() as session:
+            result = await session.execute(
+                update(HostRow).where(HostRow.id == host_id).values(roles=roles)
             )
-        return result == "UPDATE 1"
+            await session.commit()
+            return result.rowcount == 1
 
     async def update_host_registration(
         self,
         host_id: str,
         *,
-        gpu_type: Optional[str] = None,
-        roles: Optional[list] = None,
+        gpu_type: str | None = None,
+        roles: list[str] | None = None,
     ) -> bool:
         """Persist gpu_type and roles from a registration event in a single UPDATE."""
-        pool = db_pool()
-        sets = []
-        params: list = [host_id]
-        idx = 2
-
+        values: dict[str, Any] = {}
         if gpu_type is not None:
-            sets.append(f"gpu_type = ${idx}")
-            params.append(gpu_type)
-            idx += 1
+            values["gpu_type"] = gpu_type
         if roles is not None:
-            sets.append(f"roles = ${idx}::jsonb")
-            params.append(json.dumps(roles))
-            idx += 1
-
-        if not sets:
+            values["roles"] = roles
+        if not values:
             return True
 
-        sql = f"UPDATE hosts SET {', '.join(sets)} WHERE id = $1"
-        async with pool.acquire() as conn:
-            result = await conn.execute(sql, *params)
-        return result == "UPDATE 1"
-
-    def _row_to_host(self, row) -> Host:
-        memory = None
-        if row["memory"]:
-            raw = (
-                row["memory"]
-                if isinstance(row["memory"], dict)
-                else json.loads(row["memory"])
+        async with self._session() as session:
+            result = await session.execute(
+                update(HostRow).where(HostRow.id == host_id).values(**values)
             )
-            memory = MemoryInfo(**raw)
-
-        raw_roles = row.get("roles")
-        if raw_roles is None:
-            roles = []
-        elif isinstance(raw_roles, list):
-            roles = raw_roles
-        else:
-            roles = json.loads(raw_roles)
-
-        return Host(
-            id=row["id"],
-            name=row["name"],
-            url=row["url"],
-            api_key=row["api_key"],
-            status=HostStatus(row["status"]),
-            last_seen=row["last_seen"],
-            memory=memory,
-            gpu_type=row.get("gpu_type"),
-            roles=roles,
-            disk_total_gb=row.get("disk_total_gb"),
-            disk_used_gb=row.get("disk_used_gb"),
-            disk_available_gb=row.get("disk_available_gb"),
-            memory_available_gb=row.get("memory_available_gb"),
-            created_at=row["created_at"],
-        )
+            await session.commit()
+            return result.rowcount == 1
 
 
 host_db = HostDB()

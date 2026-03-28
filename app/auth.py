@@ -7,7 +7,6 @@ Two authentication modes:
 
 import json
 import logging
-from typing import Optional
 
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
@@ -21,7 +20,7 @@ ENDPOINT_CACHE_PREFIX = "solar:endpoint_cache:"
 ENDPOINT_CACHE_TTL = 300  # 5 minutes
 
 
-def _extract_api_key(request: Request) -> Optional[str]:
+def _extract_api_key(request: Request) -> str | None:
     key = request.headers.get("X-API-Key")
     if key:
         return key
@@ -54,7 +53,7 @@ async def invalidate_endpoint_cache() -> None:
         from app.redis_state.connection import redis_client
 
         r = redis_client()
-        keys = []
+        keys: list[bytes] = []
         async for key in r.scan_iter(f"{ENDPOINT_CACHE_PREFIX}*"):
             keys.append(key)
         if keys:
@@ -63,7 +62,7 @@ async def invalidate_endpoint_cache() -> None:
         logger.warning("Failed to invalidate endpoint cache: %s", e)
 
 
-async def _resolve_endpoint(api_key: str) -> Optional[ApiEndpoint]:
+async def _resolve_endpoint(api_key: str) -> ApiEndpoint | None:
     try:
         from app.redis_state.connection import redis_client
 
@@ -91,7 +90,7 @@ async def _resolve_endpoint(api_key: str) -> Optional[ApiEndpoint]:
     return ep
 
 
-async def auth_middleware(request: Request, call_next):
+async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
     """Unified authentication middleware."""
     if request.method == "OPTIONS":
         return await call_next(request)
@@ -101,7 +100,6 @@ async def auth_middleware(request: Request, call_next):
     if path in public_paths:
         return await call_next(request)
 
-    # Socket.IO handles its own auth via handshake
     if path.startswith("/socket.io"):
         return await call_next(request)
 
@@ -114,13 +112,11 @@ async def auth_middleware(request: Request, call_next):
         )
 
     if path.startswith("/v1/"):
-        # OpenAI endpoint: resolve API key to endpoint
         endpoint = await _resolve_endpoint(api_key)
         if endpoint:
             request.state.endpoint_id = endpoint.id
             request.state.endpoint_name = endpoint.name
             return await call_next(request)
-        # Management key can also access /v1/* (e.g. webui listing models)
         if api_key == settings.management_api_key:
             request.state.endpoint_id = None
             request.state.endpoint_name = None
@@ -132,7 +128,6 @@ async def auth_middleware(request: Request, call_next):
         )
 
     if path.startswith("/api/"):
-        # Management API: compare against management key
         if api_key != settings.management_api_key:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -142,7 +137,6 @@ async def auth_middleware(request: Request, call_next):
         request.state.endpoint_id = None
         return await call_next(request)
 
-    # Unknown path - reject
     return JSONResponse(
         status_code=status.HTTP_401_UNAUTHORIZED,
         content=_UNAUTHORIZED_RESPONSE,

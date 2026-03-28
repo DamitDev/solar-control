@@ -1,15 +1,16 @@
 """Gateway monitoring REST API endpoints (under /api/gateway)."""
 
-from fastapi import APIRouter, Query
-from typing import Any, Dict, Optional
+from typing import Any
 from datetime import datetime, timezone, timedelta
+
+from fastapi import APIRouter, Query
 
 from app.database.logs import gateway_logger
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
 
 
-def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+def _parse_iso(ts: str | None) -> datetime | None:
     if not ts:
         return None
     try:
@@ -22,11 +23,11 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
 
 @router.get("/stats")
 async def get_stats(
-    from_ts: Optional[str] = Query(None, alias="from"),
-    to_ts: Optional[str] = Query(None, alias="to"),
-    request_type: Optional[str] = Query(None),
-    endpoint_id: Optional[str] = Query(None),
-):
+    from_ts: str | None = Query(None, alias="from"),
+    to_ts: str | None = Query(None, alias="to"),
+    request_type: str | None = Query(None),
+    endpoint_id: str | None = Query(None),
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     start = _parse_iso(from_ts) or datetime(
         now.year, now.month, now.day, tzinfo=timezone.utc
@@ -69,7 +70,7 @@ async def get_stats(
     token_in_total = sum(p_vals) if p_vals else 0
     token_out_total = sum(c_vals) if c_vals else 0
 
-    by_model: Dict[str, Dict[str, Any]] = {}
+    by_model: dict[str, dict[str, Any]] = {}
     for s in succ:
         key = s.get("resolved_model") or s.get("model") or "unknown"
         rec = by_model.setdefault(
@@ -97,7 +98,7 @@ async def get_stats(
     for r in model_rows:
         r.pop("dur_sum", None)
 
-    by_host: Dict[str, Dict[str, Any]] = {}
+    by_host: dict[str, dict[str, Any]] = {}
     for s in summaries:
         hid = s.get("host_id")
         if not hid:
@@ -148,16 +149,16 @@ async def get_stats(
 
 @router.get("/requests")
 async def list_requests(
-    from_ts: Optional[str] = Query(None, alias="from"),
-    to_ts: Optional[str] = Query(None, alias="to"),
+    from_ts: str | None = Query(None, alias="from"),
+    to_ts: str | None = Query(None, alias="to"),
     status: str = Query("all", pattern="^(all|success|error|missed)$"),
-    request_type: Optional[str] = Query(None),
-    model: Optional[str] = None,
-    host_id: Optional[str] = None,
-    endpoint_id: Optional[str] = None,
+    request_type: str | None = Query(None),
+    model: str | None = None,
+    host_id: str | None = None,
+    endpoint_id: str | None = None,
     page: int = 1,
     limit: int = 200,
-):
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     start = _parse_iso(from_ts) or (now - timedelta(days=1))
     end = _parse_iso(to_ts) or now
@@ -188,12 +189,12 @@ async def list_requests(
 
 @router.get("/events/recent")
 async def recent_events(
-    from_ts: Optional[str] = Query(None, alias="from"),
-    to_ts: Optional[str] = Query(None, alias="to"),
+    from_ts: str | None = Query(None, alias="from"),
+    to_ts: str | None = Query(None, alias="to"),
     types: str = "request_error,request_reroute",
-    endpoint_id: Optional[str] = None,
+    endpoint_id: str | None = None,
     limit: int = 1000,
-):
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     start = _parse_iso(from_ts) or (now - timedelta(days=1))
     end = _parse_iso(to_ts) or now

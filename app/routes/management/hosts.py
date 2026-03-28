@@ -2,8 +2,9 @@
 
 import asyncio
 import uuid
+from typing import Any
+
 import aiohttp
-from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -11,9 +12,6 @@ from app.models import Host, HostCreate, HostResponse, HostStatus
 from app.database.hosts import host_db
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
-
-
-# ── Pending host approval ────────────────────────────────────
 
 
 class PendingApproveRequest(BaseModel):
@@ -58,9 +56,6 @@ async def reject_host(pending_id: str):
     return {"message": "Host rejected and disconnected"}
 
 
-# ── Manual host registration (no health check required) ──────
-
-
 @router.post("", response_model=HostResponse)
 async def register_host(data: HostCreate):
     """Pre-register a host record. The host does not need to be online."""
@@ -72,8 +67,8 @@ async def register_host(data: HostCreate):
     )
 
 
-@router.get("", response_model=List[Host])
-async def list_hosts(role: Optional[str] = Query(None, description="Filter by role")):
+@router.get("", response_model=list[Host])
+async def list_hosts(role: str | None = Query(None, description="Filter by role")):
     return await host_db.get_all_hosts(role=role)
 
 
@@ -138,7 +133,7 @@ async def refresh_host_status(host_id: str):
 @router.post("/refresh-all")
 async def refresh_all_hosts():
     hosts = await host_db.get_all_hosts()
-    results = []
+    results: list[dict[str, str]] = []
     async with aiohttp.ClientSession() as session:
         for host in hosts:
             try:
@@ -175,50 +170,14 @@ async def refresh_all_hosts():
     return {"message": f"Refreshed {len(hosts)} hosts", "results": results}
 
 
-# Proxy endpoints for instance management
-
-
-@router.get("/{host_id}/instances")
-async def get_host_instances(host_id: str):
-    host = await host_db.get_host(host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Host not found")
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{host.url}/instances"
-            headers = {"X-API-Key": host.api_key}
-            async with session.get(
-                url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                raise HTTPException(
-                    status_code=response.status, detail="Failed to get instances"
-                )
-    except HTTPException:
-        raise
-    except (
-        aiohttp.ClientConnectionError,
-        aiohttp.ClientConnectorError,
-        asyncio.TimeoutError,
-    ):
-        raise HTTPException(
-            status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=502, detail=f"Cannot reach host '{host.name}': {e}"
-        )
-
-
 async def _proxy_instance_action(
     host_id: str,
     instance_id: str,
     action: str,
     method: str = "POST",
     timeout: int = 30,
-    json_data: dict = None,
-):
+    json_data: dict[str, Any] | None = None,
+) -> Any:
     host = await host_db.get_host(host_id)
     if not host:
         raise HTTPException(status_code=404, detail="Host not found")
@@ -231,7 +190,7 @@ async def _proxy_instance_action(
             )
             headers = {"X-API-Key": host.api_key, "Content-Type": "application/json"}
             req_method = getattr(session, method.lower())
-            kwargs = {
+            kwargs: dict[str, Any] = {
                 "headers": headers,
                 "timeout": aiohttp.ClientTimeout(total=timeout),
             }
@@ -258,6 +217,42 @@ async def _proxy_instance_action(
         )
 
 
+async def _proxy_get(host: Host, path: str, *, timeout: int = 10) -> Any:
+    """GET proxy to a host, returning parsed JSON."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"X-API-Key": host.api_key}
+            async with session.get(
+                f"{host.url}{path}",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                text = await response.text()
+                raise HTTPException(status_code=response.status, detail=text)
+    except HTTPException:
+        raise
+    except (
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientConnectorError,
+        asyncio.TimeoutError,
+    ):
+        raise HTTPException(
+            status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=502, detail=f"Cannot reach host '{host.name}': {e}"
+        )
+
+
+def _require_host(host: Host | None) -> Host:
+    if not host:
+        raise HTTPException(status_code=404, detail="Host not found")
+    return host
+
+
 @router.post("/{host_id}/instances/{instance_id}/start")
 async def start_instance(host_id: str, instance_id: str):
     return await _proxy_instance_action(host_id, instance_id, "start")
@@ -274,10 +269,8 @@ async def restart_instance(host_id: str, instance_id: str):
 
 
 @router.post("/{host_id}/instances")
-async def create_instance(host_id: str, instance_data: dict):
-    host = await host_db.get_host(host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Host not found")
+async def create_instance(host_id: str, instance_data: dict[str, Any]):
+    host = _require_host(await host_db.get_host(host_id))
     try:
         async with aiohttp.ClientSession() as session:
             url = f"{host.url}/instances"
@@ -309,7 +302,9 @@ async def create_instance(host_id: str, instance_data: dict):
 
 
 @router.put("/{host_id}/instances/{instance_id}")
-async def update_instance(host_id: str, instance_id: str, instance_data: dict):
+async def update_instance(
+    host_id: str, instance_id: str, instance_data: dict[str, Any]
+):
     return await _proxy_instance_action(
         host_id, instance_id, "", method="PUT", json_data=instance_data, timeout=10
     )
@@ -322,65 +317,19 @@ async def delete_instance(host_id: str, instance_id: str):
     )
 
 
+@router.get("/{host_id}/instances")
+async def get_host_instances(host_id: str):
+    host = _require_host(await host_db.get_host(host_id))
+    return await _proxy_get(host, "/instances")
+
+
 @router.get("/{host_id}/instances/{instance_id}/state")
 async def get_instance_state(host_id: str, instance_id: str):
-    host = await host_db.get_host(host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Host not found")
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{host.url}/instances/{instance_id}/state"
-            headers = {"X-API-Key": host.api_key}
-            async with session.get(
-                url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                text = await response.text()
-                raise HTTPException(status_code=response.status, detail=text)
-    except HTTPException:
-        raise
-    except (
-        aiohttp.ClientConnectionError,
-        aiohttp.ClientConnectorError,
-        asyncio.TimeoutError,
-    ):
-        raise HTTPException(
-            status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=502, detail=f"Cannot reach host '{host.name}': {e}"
-        )
+    host = _require_host(await host_db.get_host(host_id))
+    return await _proxy_get(host, f"/instances/{instance_id}/state", timeout=5)
 
 
 @router.get("/{host_id}/instances/{instance_id}/logs")
 async def get_instance_logs(host_id: str, instance_id: str):
-    host = await host_db.get_host(host_id)
-    if not host:
-        raise HTTPException(status_code=404, detail="Host not found")
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{host.url}/instances/{instance_id}/logs"
-            headers = {"X-API-Key": host.api_key}
-            async with session.get(
-                url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                text = await response.text()
-                raise HTTPException(status_code=response.status, detail=text)
-    except HTTPException:
-        raise
-    except (
-        aiohttp.ClientConnectionError,
-        aiohttp.ClientConnectorError,
-        asyncio.TimeoutError,
-    ):
-        raise HTTPException(
-            status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=502, detail=f"Cannot reach host '{host.name}': {e}"
-        )
+    host = _require_host(await host_db.get_host(host_id))
+    return await _proxy_get(host, f"/instances/{instance_id}/logs")

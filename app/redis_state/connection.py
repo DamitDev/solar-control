@@ -1,10 +1,8 @@
 """Redis connection pool for shared state."""
 
-from typing import Optional
-
 import redis.asyncio as aioredis
 
-_client: Optional[aioredis.Redis] = None
+_client: aioredis.Redis | None = None
 
 
 def redis_client() -> aioredis.Redis:

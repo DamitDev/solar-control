@@ -4,7 +4,7 @@ Maps model aliases to lists of instance entries, shared across all replicas.
 """
 
 import json
-from typing import Dict, List
+from typing import Any
 
 from .connection import redis_client
 
@@ -14,7 +14,9 @@ REGISTRY_KEY = "solar:registry"
 class RegistryStore:
     """Read/write model-to-instances mapping in Redis."""
 
-    async def set_registry(self, model_to_hosts: Dict[str, List[dict]]) -> None:
+    async def set_registry(
+        self, model_to_hosts: dict[str, list[dict[str, Any]]]
+    ) -> None:
         """Replace the entire registry atomically."""
         r = redis_client()
         pipe = r.pipeline()
@@ -27,13 +29,13 @@ class RegistryStore:
             pipe.hset(REGISTRY_KEY, mapping=mapping)
         await pipe.execute()
 
-    async def get_registry(self) -> Dict[str, List[dict]]:
+    async def get_registry(self) -> dict[str, list[dict[str, Any]]]:
         """Get the full registry."""
         r = redis_client()
         raw = await r.hgetall(REGISTRY_KEY)
         return {model: json.loads(instances) for model, instances in raw.items()}
 
-    async def get_instances_for_model(self, model: str) -> List[dict]:
+    async def get_instances_for_model(self, model: str) -> list[dict[str, Any]]:
         """Get instance list for a specific model alias."""
         r = redis_client()
         raw = await r.hget(REGISTRY_KEY, model)
@@ -41,6 +43,6 @@ class RegistryStore:
             return []
         return json.loads(raw)
 
-    async def get_all_model_names(self) -> List[str]:
+    async def get_all_model_names(self) -> list[str]:
         r = redis_client()
         return list(await r.hkeys(REGISTRY_KEY))

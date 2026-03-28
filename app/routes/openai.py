@@ -21,7 +21,7 @@ router = APIRouter(prefix="/v1", tags=["openai"])
 
 
 def _get_endpoint_id(request: Request) -> str | None:
-    return getattr(request.state, "endpoint_id", None)
+    return getattr(request.state, "endpoint_id", None)  # set by auth_middleware
 
 
 @router.get("/models")

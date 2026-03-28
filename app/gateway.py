@@ -9,13 +9,15 @@ import logging
 import re
 import uuid
 import time
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Any, AsyncIterator
+from contextlib import asynccontextmanager
 from collections import defaultdict
 from datetime import datetime, timezone
 
 from app.config import settings
 from app.database.hosts import host_db
 from app.models import HostStatus
+from app.models.socketio import HostStatusPayload
 from app.redis_state import registry_store, health_store, routing_store
 
 logger = logging.getLogger(__name__)
@@ -23,24 +25,22 @@ logger = logging.getLogger(__name__)
 
 class OpenAIGateway:
 
-    def __init__(self):
-        self.session: Optional[aiohttp.ClientSession] = None
-        self._bg_tasks: List[asyncio.Task] = []
-        self._stop_event: Optional[asyncio.Event] = None
+    def __init__(self) -> None:
+        self.session: aiohttp.ClientSession | None = None
+        self._bg_tasks: list[asyncio.Task[None]] = []
+        self._stop_event: asyncio.Event | None = None
 
-    async def _ensure_session(self):
+    async def _ensure_session(self) -> None:
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession()
 
-    async def close(self):
+    async def close(self) -> None:
         if self.session and not self.session.closed:
             await self.session.close()
 
-    # -------------------------
-    # Model registry
-    # -------------------------
+    # ── Model registry ────────────────────────────────────────
 
-    async def refresh_model_registry(self):
+    async def refresh_model_registry(self) -> None:
         """Refresh the model registry from all hosts and store in Redis."""
         await self._ensure_session()
         if not self.session:
@@ -51,7 +51,7 @@ class OpenAIGateway:
             is_host_connected,
         )
 
-        new_model_map: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        new_model_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
         hosts = await host_db.get_all_hosts()
 
         ws_hosts = []
@@ -62,7 +62,6 @@ class OpenAIGateway:
             else:
                 http_hosts.append(host)
 
-        # WebSocket-connected hosts (instant, from cache)
         for host in ws_hosts:
             ws_instances = await get_host_instances(host.id)
             await host_db.update_host_status(host.id, HostStatus.ONLINE)
@@ -93,7 +92,6 @@ class OpenAIGateway:
                     }
                     new_model_map[alias].append(entry)
 
-        # HTTP hosts in parallel
         if http_hosts:
 
             async def poll_host(host):
@@ -183,43 +181,23 @@ class OpenAIGateway:
                 for alias, entry in result:
                     new_model_map[alias].append(entry)
 
-        # Store in Redis
         await registry_store.set_registry(dict(new_model_map))
 
-    async def _notify_host_online(self, host):
+    async def _notify_host_online(self, host) -> None:
         """Emit host_status to WebUI when HTTP polling discovers a host is online."""
         from app.socketio_app.server import sio
 
         try:
             refreshed = await host_db.get_host(host.id)
             h = refreshed or host
-            await sio.emit(
-                "host_status",
-                {
-                    "host_id": h.id,
-                    "name": h.name,
-                    "status": "online",
-                    "url": h.url,
-                    "memory": h.memory.model_dump() if h.memory else None,
-                    "gpu_type": h.gpu_type,
-                    "roles": h.roles,
-                    "disk_total_gb": h.disk_total_gb,
-                    "disk_used_gb": h.disk_used_gb,
-                    "disk_available_gb": h.disk_available_gb,
-                    "memory_available_gb": h.memory_available_gb,
-                    "connected": False,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                namespace="/webui",
-            )
+            payload = HostStatusPayload.from_host(h, connected=False)
+            await sio.emit("host_status", payload.model_dump(), namespace="/webui")
         except Exception as e:
             logger.debug("Failed to notify WebUI of host online: %s", e)
 
-    # -------------------------
-    # Background tasks
-    # -------------------------
+    # ── Background tasks ──────────────────────────────────────
 
-    async def start_background_tasks(self):
+    async def start_background_tasks(self) -> None:
         if self._stop_event is not None:
             return
         self._stop_event = asyncio.Event()
@@ -229,7 +207,7 @@ class OpenAIGateway:
             asyncio.create_task(self._health_probe_loop(), name="health_probe"),
         ]
 
-    async def stop_background_tasks(self):
+    async def stop_background_tasks(self) -> None:
         if self._stop_event is None:
             return
         self._stop_event.set()
@@ -243,7 +221,7 @@ class OpenAIGateway:
         self._bg_tasks = []
         self._stop_event = None
 
-    async def _registry_refresh_loop(self):
+    async def _registry_refresh_loop(self) -> None:
         assert self._stop_event is not None
         while not self._stop_event.is_set():
             try:
@@ -258,7 +236,7 @@ class OpenAIGateway:
             except asyncio.TimeoutError:
                 pass
 
-    async def _health_probe_loop(self):
+    async def _health_probe_loop(self) -> None:
         assert self._stop_event is not None
         while not self._stop_event.is_set():
             try:
@@ -273,9 +251,9 @@ class OpenAIGateway:
             except asyncio.TimeoutError:
                 pass
 
-    async def _probe_all_instances_once(self):
+    async def _probe_all_instances_once(self) -> None:
         registry = await registry_store.get_registry()
-        instances: List[Tuple[str, str, str]] = []  # (host_id, instance_id, url)
+        instances: list[tuple[str, str, str]] = []
         for alias, inst_list in registry.items():
             for inst in inst_list:
                 instances.append(
@@ -284,7 +262,7 @@ class OpenAIGateway:
 
         sem = asyncio.Semaphore(20)
 
-        async def _probe_one(host_id: str, instance_id: str, url: str):
+        async def _probe_one(host_id: str, instance_id: str, url: str) -> None:
             async with sem:
                 ok = await self._tcp_connect_ok(url)
                 if ok:
@@ -316,15 +294,13 @@ class OpenAIGateway:
         except Exception:
             return False
 
-    # -------------------------
-    # Helpers
-    # -------------------------
+    # ── Helpers ────────────────────────────────────────────────
 
-    def _extract_usage_from_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_usage_from_result(self, result: dict[str, Any]) -> dict[str, Any]:
         usage = result.get("usage") if isinstance(result, dict) else None
         if not isinstance(usage, dict):
             return {}
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         if isinstance(usage.get("prompt_tokens"), (int, float)):
             out["prompt_tokens"] = int(usage["prompt_tokens"])
         if isinstance(usage.get("completion_tokens"), (int, float)):
@@ -335,7 +311,7 @@ class OpenAIGateway:
 
     async def _fetch_last_generation_metrics(
         self, host_id: str, instance_id: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         try:
             await self._ensure_session()
             if not self.session:
@@ -350,7 +326,7 @@ class OpenAIGateway:
                 if resp.status != 200:
                     return {}
                 data = await resp.json()
-                out: Dict[str, Any] = {}
+                out: dict[str, Any] = {}
                 if isinstance(data.get("prompt_tokens"), (int, float)):
                     out["prompt_tokens"] = int(data["prompt_tokens"])
                 if isinstance(data.get("generated_tokens"), (int, float)):
@@ -367,13 +343,13 @@ class OpenAIGateway:
         except Exception:
             return {}
 
-    async def get_available_models(self) -> List[Dict[str, Any]]:
+    async def get_available_models(self) -> list[dict[str, Any]]:
         await self._ensure_session()
         if not self.session:
             return []
 
         registry = await registry_store.get_registry()
-        models_dict = {}
+        models_dict: dict[str, dict[str, Any]] = {}
 
         for alias, instances in registry.items():
             if not instances:
@@ -403,7 +379,7 @@ class OpenAIGateway:
 
         return list(models_dict.values())
 
-    async def _resolve_model_name(self, model: str) -> Optional[str]:
+    async def _resolve_model_name(self, model: str) -> str | None:
         registry = await registry_store.get_registry()
         if model in registry and registry[model]:
             return model
@@ -412,7 +388,7 @@ class OpenAIGateway:
             return sorted(matching)[0]
         return None
 
-    def _parse_model_size(self, alias: str) -> Optional[float]:
+    def _parse_model_size(self, alias: str) -> float | None:
         try:
             size_token = alias.rsplit(":", 1)[-1] if ":" in alias else alias
             match = re.fullmatch(
@@ -435,13 +411,10 @@ class OpenAIGateway:
         self,
         model: str,
         *,
-        exclude_keys: Optional[Set[str]] = None,
-        required_endpoint: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Select the best instance for a model using host-aware load balancing.
-
-        Reads all state from Redis for cross-replica consistency.
-        """
+        exclude_keys: set[str] | None = None,
+        required_endpoint: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Select the best instance for a model using host-aware load balancing."""
         resolved_model = await self._resolve_model_name(model)
         if not resolved_model:
             return None
@@ -460,9 +433,8 @@ class OpenAIGateway:
             if not available:
                 return None
 
-        # Health filtering
-        healthy = []
-        fallback = []
+        healthy: list[dict[str, Any]] = []
+        fallback: list[dict[str, Any]] = []
         for inst in available:
             ikey = f"{inst['host_id']}-{inst['instance_id']}"
             if exclude_keys and ikey in exclude_keys:
@@ -479,15 +451,13 @@ class OpenAIGateway:
         if not candidates:
             return None
 
-        # Group by host
-        host_to_instances: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        host_to_instances: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for inst in candidates:
             host_to_instances[inst["host_id"]].append(inst)
 
         candidate_host_ids = list(host_to_instances.keys())
 
-        # Prefer hosts with zero active requests
-        free_hosts = []
+        free_hosts: list[str] = []
         for hid in candidate_host_ids:
             count = await routing_store.get_host_active(hid)
             if count == 0:
@@ -502,8 +472,7 @@ class OpenAIGateway:
             names = {hid: await host_name(hid) for hid in free_hosts}
             chosen_host = sorted(free_hosts, key=lambda h: names.get(h, h))[0]
         else:
-            # All busy - choose smallest active weight
-            host_weights = {}
+            host_weights: dict[str, float] = {}
             for hid in candidate_host_ids:
                 host_weights[hid] = await routing_store.get_weight(hid)
 
@@ -517,13 +486,12 @@ class OpenAIGateway:
             names = {hid: await host_name(hid) for hid in min_hosts}
             chosen_host = sorted(min_hosts, key=lambda h: names.get(h, h))[0]
 
-        # Pick instance on chosen host (least active, then round-robin)
         host_insts = host_to_instances[chosen_host]
         if len(host_insts) == 1:
             return host_insts[0]
 
         min_active = float("inf")
-        best = []
+        best: list[dict[str, Any]] = []
         for inst in host_insts:
             count = await routing_store.get_active(inst["host_id"], inst["instance_id"])
             if count < min_active:
@@ -535,17 +503,14 @@ class OpenAIGateway:
         if len(best) == 1:
             return best[0]
 
-        # Round-robin tiebreak
         rr_idx = await routing_store.next_rr_index(resolved_model)
         return best[rr_idx % len(best)]
 
-    # -------------------------
-    # Routing
-    # -------------------------
+    # ── Routing infrastructure ────────────────────────────────
 
     async def _broadcast_routing_event(
-        self, event_data: dict, *, endpoint_id: Optional[str] = None
-    ):
+        self, event_data: dict[str, Any], *, endpoint_id: str | None = None
+    ) -> None:
         """Broadcast a routing event to WebUI via Socket.IO and log to database."""
         from dataclasses import asdict
         from app.database.logs import gateway_logger
@@ -572,15 +537,147 @@ class OpenAIGateway:
         except Exception as e:
             logger.warning("Failed to broadcast routing event to WebUI: %s", e)
 
+    def _ts(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    async def _emit_success(
+        self,
+        request_id: str,
+        model: str,
+        instance: dict[str, Any],
+        duration: float,
+        usage_fields: dict[str, Any],
+        endpoint_id: str | None,
+    ) -> None:
+        base_data: dict[str, Any] = {
+            "request_id": request_id,
+            "model": model,
+            "host_id": instance["host_id"],
+            "instance_id": instance["instance_id"],
+            "duration": duration,
+            "timestamp": self._ts(),
+        }
+        base_data.update(usage_fields)
+        await self._broadcast_routing_event(
+            {"type": "request_success", "data": base_data},
+            endpoint_id=endpoint_id,
+        )
+
+    async def _emit_error(
+        self,
+        request_id: str,
+        model: str,
+        error_message: str,
+        duration: float,
+        endpoint_id: str | None,
+        instance: dict[str, Any] | None = None,
+        client_ip: str | None = None,
+    ) -> None:
+        data: dict[str, Any] = {
+            "request_id": request_id,
+            "model": model,
+            "error_message": error_message,
+            "duration": duration,
+            "timestamp": self._ts(),
+        }
+        if instance:
+            data["host_id"] = instance.get("host_id")
+            data["instance_id"] = instance.get("instance_id")
+        if client_ip:
+            data["client_ip"] = client_ip
+        await self._broadcast_routing_event(
+            {"type": "request_error", "data": data},
+            endpoint_id=endpoint_id,
+        )
+
+    async def _emit_reroute(
+        self,
+        request_id: str,
+        model: str,
+        instance: dict[str, Any],
+        attempt: int,
+        endpoint_id: str | None,
+    ) -> None:
+        await self._broadcast_routing_event(
+            {
+                "type": "request_reroute",
+                "data": {
+                    "request_id": request_id,
+                    "model": model,
+                    "host_id": instance.get("host_id"),
+                    "instance_id": instance.get("instance_id"),
+                    "reason": "connect_error",
+                    "attempt": attempt,
+                    "timestamp": self._ts(),
+                },
+            },
+            endpoint_id=endpoint_id,
+        )
+
+    @asynccontextmanager
+    async def _routing_context(
+        self, instance: dict[str, Any], weight: float | None
+    ) -> AsyncIterator[None]:
+        """Track active routing state in Redis, cleaning up on exit."""
+        await routing_store.increment_active(
+            instance["host_id"], instance["instance_id"]
+        )
+        await routing_store.increment_host_active(instance["host_id"])
+        if weight is not None:
+            await routing_store.add_weight(instance["host_id"], weight)
+        try:
+            yield
+        finally:
+            try:
+                await routing_store.decrement_active(
+                    instance["host_id"], instance["instance_id"]
+                )
+                await routing_store.decrement_host_active(instance["host_id"])
+                if weight is not None:
+                    await routing_store.remove_weight(instance["host_id"], weight)
+            except Exception:
+                pass
+
+    async def _find_instance_or_retry(
+        self,
+        model: str,
+        filter_endpoint: str,
+        attempted: set[str],
+        retried_once_flag: list[bool],
+    ) -> dict[str, Any] | None:
+        """Try to find an instance, with one registry-refresh retry."""
+        instance = await self._get_next_instance(
+            model, exclude_keys=attempted, required_endpoint=filter_endpoint
+        )
+        if instance:
+            return instance
+
+        if not retried_once_flag[0]:
+            retried_once_flag[0] = True
+            attempted.clear()
+            try:
+                await self.refresh_model_registry()
+            except Exception:
+                pass
+            delay = max(0.0, float(settings.route_retry_delay_s))
+            if delay > 0:
+                await asyncio.sleep(delay)
+            return await self._get_next_instance(
+                model, exclude_keys=attempted, required_endpoint=filter_endpoint
+            )
+        return None
+
+    # ── Public routing API ────────────────────────────────────
+
     async def route_request(
         self,
         model: str,
         endpoint: str,
-        data: Dict[str, Any],
+        data: dict[str, Any],
         client_ip: str = "unknown",
-        required_endpoint: Optional[str] = None,
-        endpoint_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        required_endpoint: str | None = None,
+        endpoint_id: str | None = None,
+    ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         start_time = time.time()
 
@@ -592,7 +689,7 @@ class OpenAIGateway:
                     "model": model,
                     "endpoint": endpoint,
                     "client_ip": client_ip,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": self._ts(),
                 },
             },
             endpoint_id=endpoint_id,
@@ -602,203 +699,136 @@ class OpenAIGateway:
         if not self.session:
             raise RuntimeError("Failed to create aiohttp session")
 
-        attempted: Set[str] = set()
-        last_error: Optional[Exception] = None
-        retried_once = False
+        attempted: set[str] = set()
+        last_error: Exception | None = None
+        retried_once = [False]
         filter_endpoint = required_endpoint or endpoint
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
-            instance = await self._get_next_instance(
-                model,
-                exclude_keys=attempted,
-                required_endpoint=filter_endpoint,
+            instance = await self._find_instance_or_retry(
+                model, filter_endpoint, attempted, retried_once
             )
             if not instance:
-                if not retried_once:
-                    retried_once = True
-                    attempted.clear()
-                    try:
-                        await self.refresh_model_registry()
-                    except Exception:
-                        pass
-                    delay = max(0.0, float(settings.route_retry_delay_s))
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                    continue
                 break
 
             instance_key = f"{instance['host_id']}-{instance['instance_id']}"
             attempted.add(instance_key)
             weight = self._parse_model_size(instance["model_alias"])
 
-            # Atomically track active state in Redis
-            await routing_store.increment_active(
-                instance["host_id"], instance["instance_id"]
-            )
-            await routing_store.increment_host_active(instance["host_id"])
-            if weight is not None:
-                await routing_store.add_weight(instance["host_id"], weight)
-
             host = await host_db.get_host(instance["host_id"])
             host_name = host.name if host else "unknown"
 
-            try:
-                await self._broadcast_routing_event(
-                    {
-                        "type": "request_routed",
-                        "data": {
-                            "request_id": request_id,
-                            "model": model,
-                            "resolved_model": instance["model_alias"],
-                            "host_id": instance["host_id"],
-                            "host_name": host_name,
-                            "instance_id": instance["instance_id"],
-                            "instance_url": instance["url"],
-                            "client_ip": client_ip,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "attempt": attempt + 1,
-                        },
-                    },
-                    endpoint_id=endpoint_id,
-                )
-
-                url = f"{instance['url']}{endpoint}"
-                headers = {
-                    "Authorization": f"Bearer {instance['api_key']}",
-                    "Content-Type": "application/json",
-                }
-                timeout = aiohttp.ClientTimeout(
-                    total=None, connect=settings.route_connect_timeout_s
-                )
-
-                async with self.session.post(
-                    url, json=data, headers=headers, timeout=timeout
-                ) as response:
-                    if response.status == 200:
-                        await health_store.mark_healthy(
-                            instance["host_id"],
-                            instance["instance_id"],
-                            ttl_s=settings.health_ttl_s + 2,
-                        )
-                        result = await response.json()
-                        duration = time.time() - start_time
-
-                        usage_fields = self._extract_usage_from_result(result)
-                        if (
-                            "prompt_tokens" not in usage_fields
-                            or "completion_tokens" not in usage_fields
-                        ):
-                            host_metrics = await self._fetch_last_generation_metrics(
-                                instance["host_id"], instance["instance_id"]
-                            )
-                            usage_fields = {**usage_fields, **host_metrics}
-
-                        base_data = {
-                            "request_id": request_id,
-                            "model": model,
-                            "host_id": instance["host_id"],
-                            "instance_id": instance["instance_id"],
-                            "duration": duration,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                        base_data.update(usage_fields)
-                        await self._broadcast_routing_event(
-                            {"type": "request_success", "data": base_data},
-                            endpoint_id=endpoint_id,
-                        )
-                        return result
-                    else:
-                        error_text = await response.text()
-                        duration = time.time() - start_time
-                        await self._broadcast_routing_event(
-                            {
-                                "type": "request_error",
-                                "data": {
-                                    "request_id": request_id,
-                                    "model": model,
-                                    "host_id": instance["host_id"],
-                                    "instance_id": instance["instance_id"],
-                                    "error_message": f"Request failed: {response.status} - {error_text}",
-                                    "duration": duration,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                },
-                            },
-                            endpoint_id=endpoint_id,
-                        )
-                        raise Exception(
-                            f"Request failed: {response.status} - {error_text}"
-                        )
-
-            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
-                await health_store.mark_failed(
-                    instance["host_id"],
-                    instance["instance_id"],
-                    cooldown_s=settings.health_cooldown_s,
-                )
-                last_error = e
-                await self._broadcast_routing_event(
-                    {
-                        "type": "request_reroute",
-                        "data": {
-                            "request_id": request_id,
-                            "model": model,
-                            "host_id": instance.get("host_id"),
-                            "instance_id": instance.get("instance_id"),
-                            "reason": "connect_error",
-                            "attempt": attempt + 1,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        },
-                    },
-                    endpoint_id=endpoint_id,
-                )
-            except Exception as e:
-                duration = time.time() - start_time
-                await self._broadcast_routing_event(
-                    {
-                        "type": "request_error",
-                        "data": {
-                            "request_id": request_id,
-                            "model": model,
-                            "host_id": instance.get("host_id") if instance else None,
-                            "instance_id": (
-                                instance.get("instance_id") if instance else None
-                            ),
-                            "error_message": str(e),
-                            "duration": duration,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        },
-                    },
-                    endpoint_id=endpoint_id,
-                )
-                raise
-            finally:
+            async with self._routing_context(instance, weight):
                 try:
-                    await routing_store.decrement_active(
-                        instance["host_id"], instance["instance_id"]
+                    await self._broadcast_routing_event(
+                        {
+                            "type": "request_routed",
+                            "data": {
+                                "request_id": request_id,
+                                "model": model,
+                                "resolved_model": instance["model_alias"],
+                                "host_id": instance["host_id"],
+                                "host_name": host_name,
+                                "instance_id": instance["instance_id"],
+                                "instance_url": instance["url"],
+                                "client_ip": client_ip,
+                                "timestamp": self._ts(),
+                                "attempt": attempt + 1,
+                            },
+                        },
+                        endpoint_id=endpoint_id,
                     )
-                    await routing_store.decrement_host_active(instance["host_id"])
-                    if weight is not None:
-                        await routing_store.remove_weight(instance["host_id"], weight)
-                except Exception:
-                    pass
+
+                    url = f"{instance['url']}{endpoint}"
+                    headers = {
+                        "Authorization": f"Bearer {instance['api_key']}",
+                        "Content-Type": "application/json",
+                    }
+                    timeout = aiohttp.ClientTimeout(
+                        total=None, connect=settings.route_connect_timeout_s
+                    )
+
+                    async with self.session.post(
+                        url, json=data, headers=headers, timeout=timeout
+                    ) as response:
+                        if response.status == 200:
+                            await health_store.mark_healthy(
+                                instance["host_id"],
+                                instance["instance_id"],
+                                ttl_s=settings.health_ttl_s + 2,
+                            )
+                            result = await response.json()
+                            duration = time.time() - start_time
+
+                            usage_fields = self._extract_usage_from_result(result)
+                            if (
+                                "prompt_tokens" not in usage_fields
+                                or "completion_tokens" not in usage_fields
+                            ):
+                                host_metrics = (
+                                    await self._fetch_last_generation_metrics(
+                                        instance["host_id"], instance["instance_id"]
+                                    )
+                                )
+                                usage_fields = {**usage_fields, **host_metrics}
+
+                            await self._emit_success(
+                                request_id,
+                                model,
+                                instance,
+                                duration,
+                                usage_fields,
+                                endpoint_id,
+                            )
+                            return result
+                        else:
+                            error_text = await response.text()
+                            duration = time.time() - start_time
+                            msg = f"Request failed: {response.status} - {error_text}"
+                            await self._emit_error(
+                                request_id,
+                                model,
+                                msg,
+                                duration,
+                                endpoint_id,
+                                instance=instance,
+                            )
+                            raise Exception(msg)
+
+                except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+                    await health_store.mark_failed(
+                        instance["host_id"],
+                        instance["instance_id"],
+                        cooldown_s=settings.health_cooldown_s,
+                    )
+                    last_error = e
+                    await self._emit_reroute(
+                        request_id, model, instance, attempt + 1, endpoint_id
+                    )
+                except Exception as e:
+                    duration = time.time() - start_time
+                    await self._emit_error(
+                        request_id,
+                        model,
+                        str(e),
+                        duration,
+                        endpoint_id,
+                        instance=instance,
+                    )
+                    raise
 
         error_msg = (
             f"Model '{model}' not found or no instances available"
             if not attempted
             else f"Failed to connect to model '{model}' after {len(attempted)} attempts: {last_error}"
         )
-        await self._broadcast_routing_event(
-            {
-                "type": "request_error",
-                "data": {
-                    "request_id": request_id,
-                    "model": model,
-                    "error_message": error_msg,
-                    "client_ip": client_ip,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-            },
-            endpoint_id=endpoint_id,
+        await self._emit_error(
+            request_id,
+            model,
+            error_msg,
+            time.time() - start_time,
+            endpoint_id,
+            client_ip=client_ip,
         )
         if attempted:
             raise Exception(error_msg)
@@ -808,10 +838,10 @@ class OpenAIGateway:
         self,
         model: str,
         endpoint: str,
-        data: Dict[str, Any],
+        data: dict[str, Any],
         client_ip: str = "unknown",
-        required_endpoint: Optional[str] = None,
-        endpoint_id: Optional[str] = None,
+        required_endpoint: str | None = None,
+        endpoint_id: str | None = None,
     ):
         request_id = str(uuid.uuid4())
         start_time = time.time()
@@ -825,7 +855,7 @@ class OpenAIGateway:
                     "endpoint": endpoint,
                     "stream": True,
                     "client_ip": client_ip,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": self._ts(),
                 },
             },
             endpoint_id=endpoint_id,
@@ -836,195 +866,127 @@ class OpenAIGateway:
             raise RuntimeError("Failed to create aiohttp session")
 
         filter_endpoint = required_endpoint or endpoint
-        attempted: Set[str] = set()
-        last_error: Optional[Exception] = None
-        retried_once = False
+        attempted: set[str] = set()
+        last_error: Exception | None = None
+        retried_once = [False]
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
-            instance = await self._get_next_instance(
-                model,
-                exclude_keys=attempted,
-                required_endpoint=filter_endpoint,
+            instance = await self._find_instance_or_retry(
+                model, filter_endpoint, attempted, retried_once
             )
             if not instance:
-                if not retried_once:
-                    retried_once = True
-                    attempted.clear()
-                    try:
-                        await self.refresh_model_registry()
-                    except Exception:
-                        pass
-                    delay = max(0.0, float(settings.route_retry_delay_s))
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                    continue
                 break
 
             instance_key = f"{instance['host_id']}-{instance['instance_id']}"
             attempted.add(instance_key)
             weight = self._parse_model_size(instance["model_alias"])
 
-            await routing_store.increment_active(
-                instance["host_id"], instance["instance_id"]
-            )
-            await routing_store.increment_host_active(instance["host_id"])
-            if weight is not None:
-                await routing_store.add_weight(instance["host_id"], weight)
-
             host = await host_db.get_host(instance["host_id"])
             host_name = host.name if host else "unknown"
 
-            try:
-                await self._broadcast_routing_event(
-                    {
-                        "type": "request_routed",
-                        "data": {
-                            "request_id": request_id,
-                            "model": model,
-                            "resolved_model": instance["model_alias"],
-                            "host_id": instance["host_id"],
-                            "host_name": host_name,
-                            "instance_id": instance["instance_id"],
-                            "instance_url": instance["url"],
-                            "client_ip": client_ip,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "attempt": attempt + 1,
-                        },
-                    },
-                    endpoint_id=endpoint_id,
-                )
-
-                url = f"{instance['url']}{endpoint}"
-                headers = {
-                    "Authorization": f"Bearer {instance['api_key']}",
-                    "Content-Type": "application/json",
-                }
-                timeout = aiohttp.ClientTimeout(
-                    total=None, connect=settings.route_connect_timeout_s
-                )
-
-                async with self.session.post(
-                    url, json=data, headers=headers, timeout=timeout
-                ) as response:
-                    if response.status == 200:
-                        await health_store.mark_healthy(
-                            instance["host_id"],
-                            instance["instance_id"],
-                            ttl_s=settings.health_ttl_s + 2,
-                        )
-                        async for line in response.content:
-                            yield line
-
-                        duration = time.time() - start_time
-                        usage_fields = await self._fetch_last_generation_metrics(
-                            instance["host_id"], instance["instance_id"]
-                        )
-                        base_data = {
-                            "request_id": request_id,
-                            "model": model,
-                            "host_id": instance["host_id"],
-                            "instance_id": instance["instance_id"],
-                            "duration": duration,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                        base_data.update(usage_fields)
-                        await self._broadcast_routing_event(
-                            {"type": "request_success", "data": base_data},
-                            endpoint_id=endpoint_id,
-                        )
-                        return
-                    else:
-                        error_text = await response.text()
-                        duration = time.time() - start_time
-                        await self._broadcast_routing_event(
-                            {
-                                "type": "request_error",
-                                "data": {
-                                    "request_id": request_id,
-                                    "model": model,
-                                    "host_id": instance["host_id"],
-                                    "instance_id": instance["instance_id"],
-                                    "error_message": f"Request failed: {response.status} - {error_text}",
-                                    "duration": duration,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                },
-                            },
-                            endpoint_id=endpoint_id,
-                        )
-                        raise Exception(
-                            f"Request failed: {response.status} - {error_text}"
-                        )
-
-            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
-                await health_store.mark_failed(
-                    instance["host_id"],
-                    instance["instance_id"],
-                    cooldown_s=settings.health_cooldown_s,
-                )
-                last_error = e
-                await self._broadcast_routing_event(
-                    {
-                        "type": "request_reroute",
-                        "data": {
-                            "request_id": request_id,
-                            "model": model,
-                            "host_id": instance.get("host_id"),
-                            "instance_id": instance.get("instance_id"),
-                            "reason": "connect_error",
-                            "attempt": attempt + 1,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        },
-                    },
-                    endpoint_id=endpoint_id,
-                )
-            except Exception as e:
-                duration = time.time() - start_time
-                await self._broadcast_routing_event(
-                    {
-                        "type": "request_error",
-                        "data": {
-                            "request_id": request_id,
-                            "model": model,
-                            "host_id": instance.get("host_id") if instance else None,
-                            "instance_id": (
-                                instance.get("instance_id") if instance else None
-                            ),
-                            "error_message": str(e),
-                            "duration": duration,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        },
-                    },
-                    endpoint_id=endpoint_id,
-                )
-                raise
-            finally:
+            async with self._routing_context(instance, weight):
                 try:
-                    await routing_store.decrement_active(
-                        instance["host_id"], instance["instance_id"]
+                    await self._broadcast_routing_event(
+                        {
+                            "type": "request_routed",
+                            "data": {
+                                "request_id": request_id,
+                                "model": model,
+                                "resolved_model": instance["model_alias"],
+                                "host_id": instance["host_id"],
+                                "host_name": host_name,
+                                "instance_id": instance["instance_id"],
+                                "instance_url": instance["url"],
+                                "client_ip": client_ip,
+                                "timestamp": self._ts(),
+                                "attempt": attempt + 1,
+                            },
+                        },
+                        endpoint_id=endpoint_id,
                     )
-                    await routing_store.decrement_host_active(instance["host_id"])
-                    if weight is not None:
-                        await routing_store.remove_weight(instance["host_id"], weight)
-                except Exception:
-                    pass
+
+                    url = f"{instance['url']}{endpoint}"
+                    headers = {
+                        "Authorization": f"Bearer {instance['api_key']}",
+                        "Content-Type": "application/json",
+                    }
+                    timeout = aiohttp.ClientTimeout(
+                        total=None, connect=settings.route_connect_timeout_s
+                    )
+
+                    async with self.session.post(
+                        url, json=data, headers=headers, timeout=timeout
+                    ) as response:
+                        if response.status == 200:
+                            await health_store.mark_healthy(
+                                instance["host_id"],
+                                instance["instance_id"],
+                                ttl_s=settings.health_ttl_s + 2,
+                            )
+                            async for line in response.content:
+                                yield line
+
+                            duration = time.time() - start_time
+                            usage_fields = await self._fetch_last_generation_metrics(
+                                instance["host_id"], instance["instance_id"]
+                            )
+                            await self._emit_success(
+                                request_id,
+                                model,
+                                instance,
+                                duration,
+                                usage_fields,
+                                endpoint_id,
+                            )
+                            return
+                        else:
+                            error_text = await response.text()
+                            duration = time.time() - start_time
+                            msg = f"Request failed: {response.status} - {error_text}"
+                            await self._emit_error(
+                                request_id,
+                                model,
+                                msg,
+                                duration,
+                                endpoint_id,
+                                instance=instance,
+                            )
+                            raise Exception(msg)
+
+                except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+                    await health_store.mark_failed(
+                        instance["host_id"],
+                        instance["instance_id"],
+                        cooldown_s=settings.health_cooldown_s,
+                    )
+                    last_error = e
+                    await self._emit_reroute(
+                        request_id, model, instance, attempt + 1, endpoint_id
+                    )
+                except Exception as e:
+                    duration = time.time() - start_time
+                    await self._emit_error(
+                        request_id,
+                        model,
+                        str(e),
+                        duration,
+                        endpoint_id,
+                        instance=instance,
+                    )
+                    raise
 
         error_msg = (
             f"Model '{model}' not found or no instances available"
             if not attempted
             else f"Failed to connect to model '{model}' after {len(attempted)} attempts: {last_error}"
         )
-        await self._broadcast_routing_event(
-            {
-                "type": "request_error",
-                "data": {
-                    "request_id": request_id,
-                    "model": model,
-                    "error_message": error_msg,
-                    "client_ip": client_ip,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-            },
-            endpoint_id=endpoint_id,
+        await self._emit_error(
+            request_id,
+            model,
+            error_msg,
+            time.time() - start_time,
+            endpoint_id,
+            client_ip=client_ip,
         )
         if attempted:
             raise Exception(error_msg)

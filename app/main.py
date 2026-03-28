@@ -35,16 +35,14 @@ logging.getLogger("uvicorn.access").setLevel(getattr(logging, log_level, logging
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.database import init_db, close_db, ensure_schema
+    from app.database import init_db, close_db
     from app.database.logs import gateway_logger
     from app.redis_state import init_redis, close_redis
     from app.gateway import gateway
 
     logger.info("Starting Solar Control v%s ...", __version__)
 
-    # Initialize PostgreSQL
     await init_db(settings.database_url)
-    await ensure_schema()
     logger.info("PostgreSQL connected")
 
     # Initialize Redis
@@ -116,12 +114,12 @@ async def health_check():
 async def readiness_check():
     """Readiness probe - checks DB and Redis connectivity."""
     try:
-        from app.database.connection import db_pool
+        from sqlalchemy import text
+        from app.database.connection import get_session_factory
         from app.redis_state.connection import redis_client
 
-        pool = db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("SELECT 1")
+        async with get_session_factory()() as session:
+            await session.execute(text("SELECT 1"))
         r = redis_client()
         await r.ping()
         return {"status": "ready"}

@@ -1,6 +1,5 @@
 """API endpoint management routes (under /api/endpoints)."""
 
-from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, model_validator
 
@@ -9,24 +8,22 @@ from app.auth import invalidate_endpoint_cache
 
 router = APIRouter(prefix="/endpoints", tags=["endpoints"])
 
-_UNSET = object()
-
 
 class EndpointCreate(BaseModel):
     name: str
-    description: Optional[str] = None
-    api_key: Optional[str] = None
+    description: str | None = None
+    api_key: str | None = None
 
 
 class EndpointUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    api_key: Optional[str] = None
+    name: str | None = None
+    description: str | None = None
+    api_key: str | None = None
     _description_provided: bool = False
 
     @model_validator(mode="before")
     @classmethod
-    def _track_description(cls, values):
+    def _track_description(cls, values: dict) -> dict:
         if isinstance(values, dict) and "description" in values:
             values["_description_provided"] = True
         return values
@@ -64,7 +61,7 @@ async def get_endpoint(endpoint_id: str):
 
 @router.put("/{endpoint_id}")
 async def update_endpoint(endpoint_id: str, data: EndpointUpdate):
-    kwargs = {}
+    kwargs: dict[str, str | None] = {}
     if data.name is not None:
         kwargs["name"] = data.name
     if data._description_provided:

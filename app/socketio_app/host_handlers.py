@@ -13,12 +13,21 @@ All connection state is stored in Redis for multi-replica consistency.
 import asyncio
 import logging
 import uuid
+from typing import Any
 from datetime import datetime, timezone
-from typing import List, Optional
 
 from .server import sio
 from app.database.hosts import host_db
-from app.models import HostStatus
+from app.models import Host, HostStatus
+from app.models.socketio import (
+    HostHealthPayload,
+    HostPendingPayload,
+    HostStatusPayload,
+    InstancesUpdatePayload,
+    InstanceStatePayload,
+    LogPayload,
+    WSRegistration,
+)
 from app.redis_state import host_store
 
 logger = logging.getLogger(__name__)
@@ -27,7 +36,7 @@ logger = logging.getLogger(__name__)
 # ── Public helpers (async, backed by Redis) ───────────────────
 
 
-async def get_host_instances(host_id: str) -> list:
+async def get_host_instances(host_id: str) -> list[dict[str, Any]]:
     return await host_store.get_host_instances(host_id)
 
 
@@ -35,25 +44,33 @@ async def is_host_connected(host_id: str) -> bool:
     return await host_store.is_host_connected(host_id)
 
 
-async def get_connected_host_ids() -> list:
+async def get_connected_host_ids() -> list[str]:
     return await host_store.get_connected_host_ids()
 
 
-async def get_pending_hosts() -> List[dict]:
+async def get_pending_hosts() -> list[dict[str, Any]]:
     return await host_store.get_all_pending()
 
 
-async def get_pending_host(pending_id: str) -> Optional[dict]:
+async def get_pending_host(pending_id: str) -> dict[str, Any] | None:
     return await host_store.get_pending(pending_id)
 
 
-async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional[str]:
+def _api_key_preview(api_key: str) -> str:
+    return api_key[:8] + "..." if len(api_key) > 8 else api_key
+
+
+async def _emit_host_status(host: Host, *, connected: bool) -> None:
+    """Emit a host_status event to WebUI using the typed payload model."""
+    payload = HostStatusPayload.from_host(host, connected=connected)
+    await sio.emit("host_status", payload.model_dump(), namespace="/webui")
+
+
+async def approve_pending_host(pending_id: str, name: str, url: str) -> str | None:
     """Approve a pending host: create DB record, promote the socket connection.
 
     Returns the new host_id, or None if the pending_id was not found.
     """
-    from app.models import Host
-
     p = await host_store.remove_pending(pending_id)
     if not p:
         return None
@@ -72,8 +89,8 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
     )
     await host_db.add_host(host)
 
-    sid = p["sid"]
-    instances = p.get("instances", [])
+    sid: str = p["sid"]
+    instances: list[dict[str, Any]] = p.get("instances", [])
 
     await host_store.register_host(sid, host_id)
     if instances:
@@ -93,32 +110,11 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
     await sio.emit(
         "host_pending_removed", {"pending_id": pending_id}, namespace="/webui"
     )
-    await sio.emit(
-        "host_status",
-        {
-            "host_id": host_id,
-            "name": name,
-            "status": "online",
-            "url": url,
-            "memory": None,
-            "gpu_type": gpu_type,
-            "roles": roles,
-            "disk_total_gb": None,
-            "disk_used_gb": None,
-            "disk_available_gb": None,
-            "memory_available_gb": None,
-            "connected": True,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
-        namespace="/webui",
-    )
+    await _emit_host_status(host, connected=True)
 
     if instances:
-        await sio.emit(
-            "instances_update",
-            {"host_id": host_id, "instances": instances},
-            namespace="/webui",
-        )
+        payload = InstancesUpdatePayload(host_id=host_id, instances=instances)
+        await sio.emit("instances_update", payload.model_dump(), namespace="/webui")
 
     try:
         from app.gateway import gateway
@@ -158,33 +154,20 @@ async def reject_pending_host(pending_id: str) -> bool:
 
 
 @sio.on("connect", namespace="/hosts")
-async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
+async def host_connect(
+    sid: str, environ: dict[str, Any], auth: dict[str, Any] | None = None
+):
     if not auth or "api_key" not in auth:
         logger.warning("Host %s rejected: no auth", sid)
         raise ConnectionRefusedError("Authentication required")
 
-    api_key = auth["api_key"]
-
+    api_key: str = auth["api_key"]
     host = await host_db.get_host_by_api_key(api_key)
 
     if host:
-        old_sid = await host_store.register_host(sid, host.id)
-        if old_sid:
-            logger.info(
-                "Host '%s' (%s) reconnected [new_sid=%s, stale_sid=%s]",
-                host.name,
-                host.id,
-                sid,
-                old_sid,
-            )
-            try:
-                await sio.disconnect(old_sid, namespace="/hosts")
-            except Exception:
-                pass
-        else:
-            logger.info("Host '%s' (%s) connected [sid=%s]", host.name, host.id, sid)
-
+        await host_store.register_host(sid, host.id)
         await host_db.update_host_status(host.id, HostStatus.ONLINE)
+        logger.info("Host '%s' (%s) connected [sid=%s]", host.name, host.id, sid)
 
         await sio.emit(
             "registration_ack",
@@ -197,28 +180,10 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
             namespace="/hosts",
         )
 
-        await sio.emit(
-            "host_status",
-            {
-                "host_id": host.id,
-                "name": host.name,
-                "status": "online",
-                "url": host.url,
-                "memory": host.memory.model_dump() if host.memory else None,
-                "gpu_type": host.gpu_type,
-                "roles": host.roles,
-                "disk_total_gb": host.disk_total_gb,
-                "disk_used_gb": host.disk_used_gb,
-                "disk_available_gb": host.disk_available_gb,
-                "memory_available_gb": host.memory_available_gb,
-                "connected": True,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            namespace="/webui",
-        )
+        await _emit_host_status(host, connected=True)
     else:
         pending_id = str(uuid.uuid4())
-        pending_data = {
+        pending_data: dict[str, Any] = {
             "pending_id": pending_id,
             "sid": sid,
             "api_key": api_key,
@@ -226,27 +191,11 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
             "instances": [],
             "connected_at": datetime.now(timezone.utc).isoformat(),
         }
-        old_pending_id = await host_store.add_pending(pending_id, sid, pending_data)
+        await host_store.add_pending(pending_id, sid, pending_data)
 
-        if old_pending_id:
-            logger.info(
-                "Host %s reconnected with unknown key -> pending replaced "
-                "(old=%s, new=%s)",
-                sid,
-                old_pending_id,
-                pending_id,
-            )
-            await sio.emit(
-                "host_pending_removed",
-                {"pending_id": old_pending_id},
-                namespace="/webui",
-            )
-        else:
-            logger.info(
-                "Host %s connected with unknown key -> pending (id=%s)",
-                sid,
-                pending_id,
-            )
+        logger.info(
+            "Host %s connected with unknown key -> pending (id=%s)", sid, pending_id
+        )
 
         await sio.emit(
             "pending",
@@ -259,16 +208,13 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
             namespace="/hosts",
         )
 
-        await sio.emit(
-            "host_pending",
-            {
-                "pending_id": pending_id,
-                "api_key_preview": api_key[:8] + "..." if len(api_key) > 8 else api_key,
-                "host_name": pending_data["host_name"],
-                "connected_at": pending_data["connected_at"],
-            },
-            namespace="/webui",
+        payload = HostPendingPayload(
+            pending_id=pending_id,
+            api_key_preview=_api_key_preview(api_key),
+            host_name=pending_data["host_name"],
+            connected_at=pending_data["connected_at"],
         )
+        await sio.emit("host_pending", payload.model_dump(), namespace="/webui")
 
 
 @sio.on("disconnect", namespace="/hosts")
@@ -280,25 +226,8 @@ async def host_disconnect(sid: str):
         host = await host_db.get_host(host_id)
         logger.info("Host '%s' (%s) disconnected", host.name if host else "?", host_id)
 
-        await sio.emit(
-            "host_status",
-            {
-                "host_id": host_id,
-                "name": host.name if host else None,
-                "status": "offline",
-                "url": host.url if host else None,
-                "memory": host.memory.model_dump() if host and host.memory else None,
-                "gpu_type": host.gpu_type if host else None,
-                "roles": host.roles if host else [],
-                "disk_total_gb": host.disk_total_gb if host else None,
-                "disk_used_gb": host.disk_used_gb if host else None,
-                "disk_available_gb": host.disk_available_gb if host else None,
-                "memory_available_gb": host.memory_available_gb if host else None,
-                "connected": False,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            namespace="/webui",
-        )
+        if host:
+            await _emit_host_status(host, connected=False)
         return
 
     pending_id = await host_store.remove_pending_by_sid(sid)
@@ -310,34 +239,30 @@ async def host_disconnect(sid: str):
 
 
 @sio.on("registration", namespace="/hosts")
-async def host_registration(sid: str, data: dict):
+async def host_registration(sid: str, data: dict[str, Any]):
     """Receive initial instance list, gpu_type, and roles from host."""
+    reg = WSRegistration.model_validate(data)
+
     host_id = await host_store.get_host_id_for_sid(sid)
     if host_id:
-        instances = data.get("instances", [])
-        gpu_type = data.get("gpu_type")
-        roles = data.get("roles", [])
-        await host_store.set_host_instances(host_id, instances)
+        await host_store.set_host_instances(host_id, reg.instances)
 
         logger.info(
             "Registration from %s: gpu_type=%s, roles=%s, instances=%d",
             host_id,
-            gpu_type,
-            roles,
-            len(instances),
+            reg.gpu_type,
+            reg.roles,
+            len(reg.instances),
         )
-        if gpu_type or roles:
+        if reg.gpu_type or reg.roles:
             await host_db.update_host_registration(
                 host_id,
-                gpu_type=gpu_type,
-                roles=roles or None,
+                gpu_type=reg.gpu_type,
+                roles=reg.roles or None,
             )
 
-        await sio.emit(
-            "instances_update",
-            {"host_id": host_id, "instances": instances},
-            namespace="/webui",
-        )
+        payload = InstancesUpdatePayload(host_id=host_id, instances=reg.instances)
+        await sio.emit("instances_update", payload.model_dump(), namespace="/webui")
 
         try:
             from app.gateway import gateway
@@ -351,77 +276,64 @@ async def host_registration(sid: str, data: dict):
     if pending_id:
         p = await host_store.get_pending(pending_id)
         if p:
-            p["host_name"] = data.get("host_name", p.get("host_name", ""))
-            p["instances"] = data.get("instances", [])
-            p["gpu_type"] = data.get("gpu_type")
-            p["roles"] = data.get("roles", [])
+            p["host_name"] = reg.host_name or p.get("host_name", "")
+            p["instances"] = reg.instances
+            p["gpu_type"] = reg.gpu_type
+            p["roles"] = reg.roles
             await host_store.update_pending(pending_id, p)
 
-            await sio.emit(
-                "host_pending",
-                {
-                    "pending_id": pending_id,
-                    "api_key_preview": (
-                        p["api_key"][:8] + "..."
-                        if len(p["api_key"]) > 8
-                        else p["api_key"]
-                    ),
-                    "host_name": p["host_name"],
-                    "instance_count": len(p["instances"]),
-                    "connected_at": p["connected_at"],
-                },
-                namespace="/webui",
+            payload = HostPendingPayload(
+                pending_id=pending_id,
+                api_key_preview=_api_key_preview(p["api_key"]),
+                host_name=p["host_name"],
+                instance_count=len(p["instances"]),
+                connected_at=p["connected_at"],
             )
+            await sio.emit("host_pending", payload.model_dump(), namespace="/webui")
 
 
 @sio.on("instance_state", namespace="/hosts")
-async def host_instance_state(sid: str, data: dict):
+async def host_instance_state(sid: str, data: dict[str, Any]):
     host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
     host = await host_db.get_host(host_id)
-    await sio.emit(
-        "instance_state",
-        {
-            "host_id": host_id,
-            "host_name": host.name if host else None,
-            "instance_id": data.get("instance_id"),
-            "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            "data": data.get("data", data),
-        },
-        namespace="/webui",
+    payload = InstanceStatePayload(
+        host_id=host_id,
+        host_name=host.name if host else None,
+        instance_id=data.get("instance_id"),
+        timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        data=data.get("data", data),
     )
+    await sio.emit("instance_state", payload.model_dump(), namespace="/webui")
 
 
 @sio.on("log", namespace="/hosts")
-async def host_log(sid: str, data: dict):
+async def host_log(sid: str, data: dict[str, Any]):
     host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
     host = await host_db.get_host(host_id)
-    await sio.emit(
-        "log",
-        {
-            "host_id": host_id,
-            "host_name": host.name if host else None,
-            "instance_id": data.get("instance_id"),
-            "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            "data": data.get("data", data),
-        },
-        namespace="/webui",
+    payload = LogPayload(
+        host_id=host_id,
+        host_name=host.name if host else None,
+        instance_id=data.get("instance_id"),
+        timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        data=data.get("data", data),
     )
+    await sio.emit("log", payload.model_dump(), namespace="/webui")
 
 
 @sio.on("log_batch", namespace="/hosts")
-async def host_log_batch(sid: str, data: dict):
+async def host_log_batch(sid: str, data: dict[str, Any]):
     """Handle batched log entries from a host."""
     host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
-    entries = data.get("entries", [])
+    entries: list[dict[str, Any]] = data.get("entries", [])
     if not entries:
         return
 
@@ -429,33 +341,28 @@ async def host_log_batch(sid: str, data: dict):
     host_name = host.name if host else None
 
     for entry in entries:
-        await sio.emit(
-            "log",
-            {
-                "host_id": host_id,
-                "host_name": host_name,
-                "instance_id": entry.get("instance_id"),
-                "timestamp": entry.get(
-                    "timestamp", datetime.now(timezone.utc).isoformat()
-                ),
-                "data": {
-                    "seq": entry.get("seq"),
-                    "line": entry.get("line"),
-                    "level": entry.get("level", "info"),
-                },
+        payload = LogPayload(
+            host_id=host_id,
+            host_name=host_name,
+            instance_id=entry.get("instance_id"),
+            timestamp=entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            data={
+                "seq": entry.get("seq"),
+                "line": entry.get("line"),
+                "level": entry.get("level", "info"),
             },
-            namespace="/webui",
         )
+        await sio.emit("log", payload.model_dump(), namespace="/webui")
 
 
 @sio.on("instance_state_batch", namespace="/hosts")
-async def host_instance_state_batch(sid: str, data: dict):
+async def host_instance_state_batch(sid: str, data: dict[str, Any]):
     """Handle batched instance state updates from a host."""
     host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
-    entries = data.get("entries", [])
+    entries: list[dict[str, Any]] = data.get("entries", [])
     if not entries:
         return
 
@@ -463,28 +370,23 @@ async def host_instance_state_batch(sid: str, data: dict):
     host_name = host.name if host else None
 
     for entry in entries:
-        await sio.emit(
-            "instance_state",
-            {
-                "host_id": host_id,
-                "host_name": host_name,
-                "instance_id": entry.get("instance_id"),
-                "timestamp": entry.get(
-                    "timestamp", datetime.now(timezone.utc).isoformat()
-                ),
-                "data": entry.get("data", entry),
-            },
-            namespace="/webui",
+        payload = InstanceStatePayload(
+            host_id=host_id,
+            host_name=host_name,
+            instance_id=entry.get("instance_id"),
+            timestamp=entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            data=entry.get("data", entry),
         )
+        await sio.emit("instance_state", payload.model_dump(), namespace="/webui")
 
 
 @sio.on("host_health", namespace="/hosts")
-async def host_health(sid: str, data: dict):
+async def host_health(sid: str, data: dict[str, Any]):
     host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
-    health_data = data.get("data", data)
+    health_data: dict[str, Any] = data.get("data", data)
     memory = health_data.get("memory")
     gpu_type = health_data.get("gpu_type")
     roles = health_data.get("roles")
@@ -508,37 +410,33 @@ async def host_health(sid: str, data: dict):
         await host_db.update_host_roles(host_id, roles)
 
     host = await host_db.get_host(host_id)
-    await sio.emit(
-        "host_health",
-        {
-            "host_id": host_id,
-            "host_name": host.name if host else None,
-            "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            "data": health_data,
-            "memory": host.memory.model_dump() if host and host.memory else None,
-            "disk_total_gb": host.disk_total_gb if host else None,
-            "disk_used_gb": host.disk_used_gb if host else None,
-            "disk_available_gb": host.disk_available_gb if host else None,
-            "memory_available_gb": host.memory_available_gb if host else None,
-        },
-        namespace="/webui",
+    payload = HostHealthPayload(
+        host_id=host_id,
+        host_name=host.name if host else None,
+        timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        data=health_data,
+        memory=host.memory.model_dump() if host and host.memory else None,
+        disk_total_gb=host.disk_total_gb if host else None,
+        disk_used_gb=host.disk_used_gb if host else None,
+        disk_available_gb=host.disk_available_gb if host else None,
+        memory_available_gb=host.memory_available_gb if host else None,
     )
+    await sio.emit("host_health", payload.model_dump(), namespace="/webui")
 
 
 @sio.on("instances_update", namespace="/hosts")
-async def host_instances_update(sid: str, data: dict):
+async def host_instances_update(sid: str, data: dict[str, Any]):
     host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
-    instances = data.get("data", {}).get("instances", data.get("instances", []))
+    instances: list[dict[str, Any]] = data.get("data", {}).get(
+        "instances", data.get("instances", [])
+    )
     await host_store.set_host_instances(host_id, instances)
 
-    await sio.emit(
-        "instances_update",
-        {"host_id": host_id, "instances": instances},
-        namespace="/webui",
-    )
+    payload = InstancesUpdatePayload(host_id=host_id, instances=instances)
+    await sio.emit("instances_update", payload.model_dump(), namespace="/webui")
 
     try:
         from app.gateway import gateway
