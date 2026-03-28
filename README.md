@@ -12,11 +12,12 @@ A coordinator for multiple solar-host instances with OpenAI-compatible API gatew
 - Model alias resolution (exact match; optional prefix fallback)
 - Host-aware, model-size-weighted load balancing (prefers free hosts; otherwise chooses lowest active parameter load; round-robin tiebreaker)
 - **Endpoint-aware routing** - Routes requests only to instances that support the requested endpoint
+- **Multi-tenant API** - Create multiple API endpoints with individual keys, tracked usage stats
 - **WebUI Socket.IO namespace** - `/webui` for dashboard: real-time host/instance status, gateway events, pending host approval
 - **Pending host approval** - Hosts register first; management API lists and approves/rejects before they join the pool
-- Transparent authentication handling (gateway API keys; management API key for WebUI and management routes)
+- Transparent authentication handling (endpoint API keys for gateway; management API key for WebUI and admin routes)
 - WebSocket log aggregation
-- Docker support
+- Docker support with automatic database migrations
 
 ## Supported Backend Types
 
@@ -26,11 +27,11 @@ A coordinator for multiple solar-host instances with OpenAI-compatible API gatew
 | **HuggingFace Causal** | `/v1/chat/completions`, `/v1/completions`, `/v1/models` |
 | **HuggingFace Classification** | `/v1/classify`, `/v1/models` |
 | **HuggingFace Embedding** | `/v1/embeddings`, `/v1/models` |
+| **Reranker** | `/v1/rerank`, `/v1/models` |
 
 ## Installation
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -39,30 +40,32 @@ pip install -r requirements.txt
 Create a `.env` file or set environment variables:
 
 ```bash
-API_KEY=your-gateway-api-key-here
 MANAGEMENT_API_KEY=your-management-api-key-here
 HOST=0.0.0.0
 PORT=8000
+DATABASE_URL=postgresql://solar:solar@localhost:5432/solar_gateway
 REDIS_URL=redis://localhost:6379/0
 ```
 
-- **API_KEY** - Used by clients for gateway requests (chat, completions, classify, embeddings).
 - **MANAGEMENT_API_KEY** - Required for WebUI and management API (host approval, endpoints, gateway stats). Sent as `X-API-Key` or `Authorization: Bearer <key>` (or via Socket.IO `auth` for the `/webui` namespace).
-- **REDIS_URL** - Required. Used for host connection state (sid↔host, instances, pending hosts) and endpoint API key cache. Enables stateless operation and multiple replicas.
+- **DATABASE_URL** - PostgreSQL connection string. Stores hosts, API endpoints, and gateway request logs.
+- **REDIS_URL** - Required. Used for host connection state (sid-to-host, instances, pending hosts), endpoint API key cache, and routing state. Enables stateless operation and multiple replicas.
+
+Gateway API keys are managed through the multi-tenant endpoint system (see `/api/endpoints`).
 
 ## Running Natively
 
 ```bash
+# Run database migrations first
+./migrate.sh
+
 # Start the server (ASGI app; Socket.IO and HTTP on same port)
-uvicorn app.main:asgi_app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:sio_asgi_app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ## Running with Docker
 
 ```bash
-# Create the data directory first (if it doesn't exist)
-mkdir -p data
-
 # Build and start with docker-compose
 docker-compose up -d
 
@@ -73,7 +76,24 @@ docker-compose logs -f
 docker-compose down
 ```
 
-**Note:** Configuration and hosts are stored in the `data/` directory, which is mounted as a volume. Redis is required for host state and endpoint cache; use the same `REDIS_URL` (or a shared Redis instance) across replicas so they stay in sync.
+The container entrypoint automatically runs Alembic database migrations before starting the application. PostgreSQL and Redis healthchecks ensure the app only starts after both services are ready.
+
+## Database Migrations
+
+Schema changes are managed with [Alembic](https://alembic.sqlalchemy.org/). SQLAlchemy table models live in `app/database/tables.py`.
+
+```bash
+# Apply all pending migrations (runs automatically on container start)
+python -m alembic upgrade head
+
+# Check current revision
+python -m alembic current
+
+# Create a new migration after modifying tables.py
+python -m alembic revision --autogenerate -m "description of change"
+```
+
+Migration files are in `app/database/migrations/versions/` and follow a `NNNN_description.py` naming convention.
 
 ## API Endpoints
 
@@ -89,10 +109,19 @@ docker-compose down
 ### Pending Host Approval (Management API)
 
 - `GET /api/hosts/pending` - List hosts awaiting approval
-- `POST /api/hosts/pending/{pending_id}/approve` - Approve and add host (body: name, url, api_key)
+- `POST /api/hosts/pending/{pending_id}/approve` - Approve and add host (body: name, url)
 - `POST /api/hosts/pending/{pending_id}/reject` - Reject pending host
 
 Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending until approved via these endpoints. The WebUI uses the same management API key for Socket.IO and REST.
+
+### API Endpoint Management
+
+- `GET /api/endpoints` - List all API endpoints (tenants)
+- `POST /api/endpoints` - Create a new endpoint (generates API key)
+- `GET /api/endpoints/{id}` - Get endpoint details
+- `PUT /api/endpoints/{id}` - Update endpoint
+- `DELETE /api/endpoints/{id}` - Delete endpoint
+- `GET /api/endpoints/{id}/usage` - Get usage statistics
 
 ### OpenAI Gateway
 
@@ -108,6 +137,16 @@ Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending un
 
 - `POST /v1/embeddings` - Text embeddings (routed by model to HuggingFace Embedding instances)
 
+### Rerank Gateway
+
+- `POST /v1/rerank` - Rerank documents against a query (routed by model to reranker instances)
+
+### Gateway Monitoring
+
+- `GET /api/gateway/stats` - Request statistics with per-model and per-host breakdowns
+- `GET /api/gateway/requests` - Paginated request history with filtering
+- `GET /api/gateway/events/recent` - Recent routing events (errors, reroutes)
+
 ### Instance Proxy (via solar-control to host)
 
 - `POST /api/hosts/{host_id}/instances/{instance_id}/start` - Start instance
@@ -118,10 +157,10 @@ Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending un
 
 ## Authentication
 
-- **Gateway requests** (e.g. `/v1/chat/completions`, `/v1/embeddings`) use **API_KEY**. Send `X-API-Key` or `Authorization: Bearer <key>`.
+- **Gateway requests** (e.g. `/v1/chat/completions`, `/v1/embeddings`) use **endpoint API keys** created via `/api/endpoints`. Send as `X-API-Key` or `Authorization: Bearer <key>`. The management key also works for gateway requests.
 - **Management and WebUI** use **MANAGEMENT_API_KEY**: management REST routes and the Socket.IO `/webui` namespace. WebUI clients can send the key in Socket.IO `auth.api_key` or the reverse proxy can inject `X-API-Key` / `Authorization` on the upgrade request.
 
-Solar-control handles authentication to solar-hosts transparently using stored credentials. Endpoint API keys (for gateway routing) are cached in Redis with TTL and invalidation on endpoint create/update/delete.
+Solar-control handles authentication to solar-hosts transparently using stored credentials. Endpoint API keys are cached in Redis with TTL and invalidation on create/update/delete.
 
 ## Socket.IO Namespaces
 
@@ -146,7 +185,7 @@ After a host is approved (or when creating directly via management API):
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
-  -H "X-API-Key: your-gateway-api-key" \
+  -H "X-API-Key: your-endpoint-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "llama3:8b",
@@ -158,7 +197,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ```bash
 curl http://localhost:8000/v1/classify \
-  -H "X-API-Key: your-gateway-api-key" \
+  -H "X-API-Key: your-endpoint-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "classifier:deberta",
@@ -191,7 +230,7 @@ curl http://localhost:8000/v1/classify \
 
 ```bash
 curl http://localhost:8000/v1/classify \
-  -H "X-API-Key: your-gateway-api-key" \
+  -H "X-API-Key: your-endpoint-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "classifier:deberta",
@@ -206,7 +245,7 @@ curl http://localhost:8000/v1/classify \
 
 ```bash
 curl http://localhost:8000/v1/embeddings \
-  -H "X-API-Key: your-gateway-api-key" \
+  -H "X-API-Key: your-endpoint-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "embed:minilm",
@@ -222,7 +261,7 @@ curl http://localhost:8000/v1/embeddings \
   "data": [
     {
       "object": "embedding",
-      "embedding": [0.0123, -0.0456, 0.0789, ...],
+      "embedding": [0.0123, -0.0456, 0.0789],
       "index": 0
     }
   ],
@@ -238,7 +277,7 @@ curl http://localhost:8000/v1/embeddings \
 
 ```bash
 curl http://localhost:8000/v1/embeddings \
-  -H "X-API-Key: your-gateway-api-key" \
+  -H "X-API-Key: your-endpoint-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "embed:minilm",
@@ -263,3 +302,42 @@ For example:
 - A `/v1/embeddings` request will only route to HuggingFace Embedding instances
 
 The gateway automatically discovers which endpoints each instance supports when the model registry is refreshed.
+
+## Project Structure
+
+```
+app/
+  config.py              # Settings (pydantic-settings)
+  auth.py                # API key authentication middleware
+  gateway.py             # Request routing and load balancing
+  main.py                # FastAPI + Socket.IO app assembly
+  models/                # Pydantic domain models
+    host.py              #   Host, HostStatus, MemoryInfo
+    openai.py            #   OpenAI-compatible request/response models
+    socketio.py          #   Socket.IO event payload models
+  database/
+    tables.py            # SQLAlchemy declarative table models
+    connection.py        # Async engine + session factory
+    hosts.py             # Host CRUD
+    endpoints.py         # API endpoint CRUD
+    logs.py              # Buffered gateway event logging
+    migrations/          # Alembic migrations
+      env.py
+      versions/          # Migration scripts (0001_initial_schema.py, ...)
+  redis_state/           # Redis-backed shared state
+    connection.py        # Redis client
+    hosts.py             # Socket.IO connection tracking
+    registry.py          # Model-to-instance registry
+    routing.py           # Active request counts, weights, round-robin
+    health.py            # Instance health TTLs
+  routes/
+    openai.py            # /v1/* gateway routes
+    management/          # /api/* admin routes
+      hosts.py           #   Host management + instance proxy
+      endpoints.py       #   API endpoint management
+      gateway.py         #   Gateway stats and request history
+  socketio_app/
+    server.py            # Socket.IO server setup
+    host_handlers.py     # /hosts namespace handlers
+    webui_handlers.py    # /webui namespace handlers
+```
