@@ -8,6 +8,11 @@ services:
       POSTGRES_DB: solar_gateway
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U solar -d solar_gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
     networks:
       - solar-network
@@ -15,6 +20,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: solar-control-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
     networks:
       - solar-network
@@ -23,8 +33,10 @@ services:
     build: .
     container_name: solar-control
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
     environment:
