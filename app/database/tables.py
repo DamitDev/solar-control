@@ -56,6 +56,7 @@ class HostRow(Base):
     disk_used_gb: Mapped[float | None] = mapped_column(Double, nullable=True)
     disk_available_gb: Mapped[float | None] = mapped_column(Double, nullable=True)
     memory_available_gb: Mapped[float | None] = mapped_column(Double, nullable=True)
+    version: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

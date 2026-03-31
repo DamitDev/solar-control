@@ -86,6 +86,7 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> str | No
         status=HostStatus.ONLINE,
         gpu_type=gpu_type,
         roles=roles,
+        version=p.get("version"),
     )
     await host_db.add_host(host)
 
@@ -257,11 +258,12 @@ async def host_registration(sid: str, data: dict[str, Any]):
             reg.roles,
             len(reg.instances),
         )
-        if reg.gpu_type or reg.roles:
+        if reg.gpu_type or reg.roles or reg.version:
             await host_db.update_host_registration(
                 host_id,
                 gpu_type=reg.gpu_type,
                 roles=reg.roles or None,
+                version=reg.version,
             )
 
         payload = InstancesUpdatePayload(host_id=host_id, instances=reg.instances)
@@ -283,6 +285,7 @@ async def host_registration(sid: str, data: dict[str, Any]):
             p["instances"] = reg.instances
             p["gpu_type"] = reg.gpu_type
             p["roles"] = reg.roles
+            p["version"] = reg.version
             await host_store.update_pending(pending_id, p)
 
             payload = HostPendingPayload(

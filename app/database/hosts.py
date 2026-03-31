@@ -39,6 +39,7 @@ class HostDB:
             disk_used_gb=row.disk_used_gb,
             disk_available_gb=row.disk_available_gb,
             memory_available_gb=row.memory_available_gb,
+            version=row.version,
             created_at=row.created_at,
         )
 
@@ -57,6 +58,7 @@ class HostDB:
             "disk_used_gb": host.disk_used_gb,
             "disk_available_gb": host.disk_available_gb,
             "memory_available_gb": host.memory_available_gb,
+            "version": host.version,
             "created_at": host.created_at,
         }
 
@@ -175,13 +177,16 @@ class HostDB:
         *,
         gpu_type: str | None = None,
         roles: list[str] | None = None,
+        version: str | None = None,
     ) -> bool:
-        """Persist gpu_type and roles from a registration event in a single UPDATE."""
+        """Persist gpu_type, roles, and version from a registration event."""
         values: dict[str, Any] = {}
         if gpu_type is not None:
             values["gpu_type"] = gpu_type
         if roles is not None:
             values["roles"] = roles
+        if version is not None:
+            values["version"] = version
         if not values:
             return True
 

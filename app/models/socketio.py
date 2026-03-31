@@ -43,6 +43,7 @@ class WSRegistration(BaseModel):
     instances: list[dict[str, Any]] = Field(default_factory=list)
     gpu_type: str | None = None
     roles: list[str] = Field(default_factory=list)
+    version: str | None = None
 
 
 class WSLogMessage(BaseModel):
@@ -97,6 +98,7 @@ class HostStatusPayload(BaseModel):
     disk_used_gb: float | None = None
     disk_available_gb: float | None = None
     memory_available_gb: float | None = None
+    version: str | None = None
     connected: bool = False
     timestamp: str = ""
 
@@ -115,6 +117,7 @@ class HostStatusPayload(BaseModel):
             disk_used_gb=host.disk_used_gb,
             disk_available_gb=host.disk_available_gb,
             memory_available_gb=host.memory_available_gb,
+            version=host.version,
             connected=connected,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )

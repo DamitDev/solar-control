@@ -40,6 +40,7 @@ class Host(BaseModel):
     disk_used_gb: float | None = None
     disk_available_gb: float | None = None
     memory_available_gb: float | None = None
+    version: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
