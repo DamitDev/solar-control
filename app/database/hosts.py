@@ -133,6 +133,7 @@ class HostDB:
         disk_total_gb: float | None = None,
         disk_used_gb: float | None = None,
         disk_available_gb: float | None = None,
+        version: str | None = None,
     ) -> bool:
         values: dict[str, Any] = {
             "memory": memory,
@@ -147,6 +148,8 @@ class HostDB:
             values["disk_used_gb"] = disk_used_gb
         if disk_available_gb is not None:
             values["disk_available_gb"] = disk_available_gb
+        if version is not None:
+            values["version"] = version
 
         async with self._session() as session:
             result = await session.execute(

@@ -399,6 +399,7 @@ async def host_health(sid: str, data: dict[str, Any]):
     disk_total_gb = health_data.get("disk_total_gb")
     disk_used_gb = health_data.get("disk_used_gb")
     disk_available_gb = health_data.get("disk_available_gb")
+    version = health_data.get("version")
 
     if memory:
         await host_db.update_host_memory(
@@ -408,6 +409,7 @@ async def host_health(sid: str, data: dict[str, Any]):
             disk_total_gb=disk_total_gb,
             disk_used_gb=disk_used_gb,
             disk_available_gb=disk_available_gb,
+            version=version,
         )
     elif gpu_type:
         await host_db.update_host_gpu_type(host_id, gpu_type)
