@@ -1,10 +1,11 @@
 """Model registry stored in Redis.
 
-Maps model aliases to lists of instance entries, shared across all replicas.
+Maps model aliases to lists of RegistryEntry instances, shared across all replicas.
 """
 
 import json
-from typing import Any
+
+from app.models.gateway import RegistryEntry
 
 from .connection import redis_client
 
@@ -15,33 +16,36 @@ class RegistryStore:
     """Read/write model-to-instances mapping in Redis."""
 
     async def set_registry(
-        self, model_to_hosts: dict[str, list[dict[str, Any]]]
+        self, model_to_instances: dict[str, list[RegistryEntry]]
     ) -> None:
         """Replace the entire registry atomically."""
         r = redis_client()
         pipe = r.pipeline()
         pipe.delete(REGISTRY_KEY)
-        if model_to_hosts:
+        if model_to_instances:
             mapping = {
-                model: json.dumps(instances)
-                for model, instances in model_to_hosts.items()
+                model: json.dumps([e.model_dump() for e in entries])
+                for model, entries in model_to_instances.items()
             }
             pipe.hset(REGISTRY_KEY, mapping=mapping)
         await pipe.execute()
 
-    async def get_registry(self) -> dict[str, list[dict[str, Any]]]:
+    async def get_registry(self) -> dict[str, list[RegistryEntry]]:
         """Get the full registry."""
         r = redis_client()
         raw = await r.hgetall(REGISTRY_KEY)
-        return {model: json.loads(instances) for model, instances in raw.items()}
+        return {
+            model: [RegistryEntry.model_validate(e) for e in json.loads(data)]
+            for model, data in raw.items()
+        }
 
-    async def get_instances_for_model(self, model: str) -> list[dict[str, Any]]:
+    async def get_instances_for_model(self, model: str) -> list[RegistryEntry]:
         """Get instance list for a specific model alias."""
         r = redis_client()
         raw = await r.hget(REGISTRY_KEY, model)
         if raw is None:
             return []
-        return json.loads(raw)
+        return [RegistryEntry.model_validate(e) for e in json.loads(raw)]
 
     async def get_all_model_names(self) -> list[str]:
         r = redis_client()

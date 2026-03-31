@@ -5,6 +5,7 @@ and pending-approval hosts. All state is shared across replicas.
 """
 
 import json
+import time
 from typing import Any
 
 from .connection import redis_client
@@ -12,6 +13,9 @@ from .connection import redis_client
 SID_MAP = "solar:hosts:sids"
 CONNECTED_MAP = "solar:hosts:connected"
 INSTANCES_MAP = "solar:hosts:instances"
+
+DISCONNECT_TS_MAP = "solar:hosts:disconnect_ts"
+RECONNECT_REQ_MAP = "solar:hosts:reconnect_req_ts"
 
 PENDING_MAP = "solar:hosts:pending"
 PENDING_SID_MAP = "solar:hosts:pending_sids"
@@ -67,6 +71,34 @@ class HostConnectionStore:
     async def remove_host_instances(self, host_id: str) -> None:
         r = redis_client()
         await r.hdel(INSTANCES_MAP, host_id)
+
+    # ── Disconnect timestamp tracking ─────────────────────────
+
+    async def set_disconnect_time(self, host_id: str) -> None:
+        r = redis_client()
+        await r.hset(DISCONNECT_TS_MAP, host_id, str(time.time()))
+
+    async def get_disconnect_time(self, host_id: str) -> float | None:
+        r = redis_client()
+        raw = await r.hget(DISCONNECT_TS_MAP, host_id)
+        return float(raw) if raw else None
+
+    async def clear_disconnect_time(self, host_id: str) -> None:
+        r = redis_client()
+        await r.hdel(DISCONNECT_TS_MAP, host_id)
+
+    async def set_reconnect_request_time(self, host_id: str) -> None:
+        r = redis_client()
+        await r.hset(RECONNECT_REQ_MAP, host_id, str(time.time()))
+
+    async def get_reconnect_request_time(self, host_id: str) -> float | None:
+        r = redis_client()
+        raw = await r.hget(RECONNECT_REQ_MAP, host_id)
+        return float(raw) if raw else None
+
+    async def clear_reconnect_request_time(self, host_id: str) -> None:
+        r = redis_client()
+        await r.hdel(RECONNECT_REQ_MAP, host_id)
 
     async def add_pending(
         self, pending_id: str, sid: str, data: dict[str, Any]

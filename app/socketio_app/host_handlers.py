@@ -166,6 +166,8 @@ async def host_connect(
 
     if host:
         await host_store.register_host(sid, host.id)
+        await host_store.clear_disconnect_time(host.id)
+        await host_store.clear_reconnect_request_time(host.id)
         await host_db.update_host_status(host.id, HostStatus.ONLINE)
         logger.info("Host '%s' (%s) connected [sid=%s]", host.name, host.id, sid)
 
@@ -221,6 +223,7 @@ async def host_connect(
 async def host_disconnect(sid: str):
     host_id = await host_store.unregister_host_by_sid(sid)
     if host_id:
+        await host_store.set_disconnect_time(host_id)
         await host_db.update_host_status(host_id, HostStatus.OFFLINE)
 
         host = await host_db.get_host(host_id)

@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 
 from app.config import settings
 from app.database.hosts import host_db
-from app.models import HostStatus
+from app.models import HostStatus, RegistryEntry
 from app.models.socketio import HostStatusPayload
-from app.redis_state import registry_store, health_store, routing_store
+from app.redis_state import registry_store, health_store, routing_store, host_store
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class OpenAIGateway:
             is_host_connected,
         )
 
-        new_model_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        new_model_map: dict[str, list[RegistryEntry]] = defaultdict(list)
         hosts = await host_db.get_all_hosts()
 
         ws_hosts = []
@@ -68,118 +68,96 @@ class OpenAIGateway:
 
             for instance in ws_instances:
                 if instance.get("status") == "running":
-                    alias = instance.get("alias", "unknown")
-                    port = instance.get("port")
-                    if not port:
-                        continue
-
-                    host_base = host.url.rsplit(":", 1)[0]
-                    instance_url = f"{host_base}:{port}"
-                    supported_endpoints = instance.get(
-                        "supported_endpoints",
-                        ["/v1/chat/completions", "/v1/completions", "/v1/models"],
+                    entry = RegistryEntry.from_ws_instance(
+                        host.id, host.url, host.api_key, instance
                     )
-                    backend_type = instance.get("backend_type", "llamacpp")
-
-                    entry = {
-                        "host_id": host.id,
-                        "instance_id": instance["id"],
-                        "url": instance_url,
-                        "api_key": host.api_key,
-                        "model_alias": alias,
-                        "supported_endpoints": supported_endpoints,
-                        "backend_type": backend_type,
-                    }
-                    new_model_map[alias].append(entry)
+                    if entry:
+                        new_model_map[entry.model_alias].append(entry)
 
         if http_hosts:
+            now = time.time()
+            grace = settings.disconnect_grace_period_s
+            reconnect_interval = settings.reconnect_request_interval_s
 
-            async def poll_host(host):
-                result_entries = []
-                try:
-                    url = f"{host.url}/instances"
-                    headers = {"X-API-Key": host.api_key}
-                    async with self.session.get(
-                        url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
-                    ) as response:
-                        if response.status == 200:
-                            instances = await response.json()
-                            prev_status = host.status
-                            await host_db.update_host_status(host.id, HostStatus.ONLINE)
-                            if prev_status != HostStatus.ONLINE:
-                                await self._notify_host_online(host)
-                            for instance in instances:
+            grace_hosts = []
+            poll_hosts = []
+
+            for host in http_hosts:
+                dc_ts = await host_store.get_disconnect_time(host.id)
+                if dc_ts is not None and (now - dc_ts) < grace:
+                    grace_hosts.append(host)
+                else:
+                    if dc_ts is not None:
+                        last_req = await host_store.get_reconnect_request_time(host.id)
+                        if last_req is None or (now - last_req) >= reconnect_interval:
+                            asyncio.create_task(self._request_host_reconnect(host))
+                    poll_hosts.append(host)
+
+            for host in grace_hosts:
+                cached = await get_host_instances(host.id)
+                for instance in cached:
+                    if instance.get("status") == "running":
+                        entry = RegistryEntry.from_ws_instance(
+                            host.id, host.url, host.api_key, instance
+                        )
+                        if entry:
+                            new_model_map[entry.model_alias].append(entry)
+
+            if poll_hosts:
+
+                async def poll_host(host):
+                    result_entries: list[RegistryEntry] = []
+                    try:
+                        url = f"{host.url}/instances"
+                        headers = {"X-API-Key": host.api_key}
+                        async with self.session.get(
+                            url,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=5),
+                        ) as response:
+                            if response.status == 200:
+                                instances = await response.json()
+                                prev_status = host.status
+                                await host_db.update_host_status(
+                                    host.id, HostStatus.ONLINE
+                                )
+                                if prev_status != HostStatus.ONLINE:
+                                    await self._notify_host_online(host)
+                                for instance in instances:
+                                    if instance.get("status") == "running":
+                                        entry = RegistryEntry.from_http_instance(
+                                            host.id, host.url, instance
+                                        )
+                                        if entry:
+                                            result_entries.append(entry)
+                            else:
+                                await host_db.update_host_status(
+                                    host.id, HostStatus.ERROR
+                                )
+                    except Exception:
+                        cached = await get_host_instances(host.id)
+                        if cached:
+                            for instance in cached:
                                 if instance.get("status") == "running":
-                                    alias = instance["config"]["alias"]
-                                    port = instance.get("port")
-                                    host_base = host.url.rsplit(":", 1)[0]
-                                    instance_url = f"{host_base}:{port}"
-                                    instance_api_key = instance["config"]["api_key"]
-                                    supported_endpoints = instance.get(
-                                        "supported_endpoints",
-                                        [
-                                            "/v1/chat/completions",
-                                            "/v1/completions",
-                                            "/v1/models",
-                                        ],
+                                    entry = RegistryEntry.from_ws_instance(
+                                        host.id, host.url, host.api_key, instance
                                     )
-                                    backend_type = instance.get("config", {}).get(
-                                        "backend_type", "llamacpp"
-                                    )
-                                    entry = {
-                                        "host_id": host.id,
-                                        "instance_id": instance["id"],
-                                        "url": instance_url,
-                                        "api_key": instance_api_key,
-                                        "model_alias": alias,
-                                        "supported_endpoints": supported_endpoints,
-                                        "backend_type": backend_type,
-                                    }
-                                    result_entries.append((alias, entry))
+                                    if entry:
+                                        result_entries.append(entry)
                         else:
-                            await host_db.update_host_status(host.id, HostStatus.ERROR)
-                except Exception:
-                    cached = await get_host_instances(host.id)
-                    if cached:
-                        for instance in cached:
-                            if instance.get("status") == "running":
-                                alias = instance.get("alias", "unknown")
-                                port = instance.get("port")
-                                if not port:
-                                    continue
-                                host_base = host.url.rsplit(":", 1)[0]
-                                instance_url = f"{host_base}:{port}"
-                                entry = {
-                                    "host_id": host.id,
-                                    "instance_id": instance["id"],
-                                    "url": instance_url,
-                                    "api_key": host.api_key,
-                                    "model_alias": alias,
-                                    "supported_endpoints": instance.get(
-                                        "supported_endpoints",
-                                        [
-                                            "/v1/chat/completions",
-                                            "/v1/completions",
-                                            "/v1/models",
-                                        ],
-                                    ),
-                                    "backend_type": instance.get(
-                                        "backend_type", "llamacpp"
-                                    ),
-                                }
-                                result_entries.append((alias, entry))
-                    else:
-                        await host_db.update_host_status(host.id, HostStatus.OFFLINE)
-                return result_entries
+                            await host_db.update_host_status(
+                                host.id, HostStatus.OFFLINE
+                            )
+                    return result_entries
 
-            results = await asyncio.gather(
-                *[poll_host(h) for h in http_hosts], return_exceptions=True
-            )
-            for result in results:
-                if isinstance(result, Exception):
-                    continue
-                for alias, entry in result:
-                    new_model_map[alias].append(entry)
+                results = await asyncio.gather(
+                    *[poll_host(h) for h in poll_hosts], return_exceptions=True
+                )
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    for entry in result:
+                        new_model_map[entry.model_alias].append(entry)
 
         await registry_store.set_registry(dict(new_model_map))
 
@@ -194,6 +172,35 @@ class OpenAIGateway:
             await sio.emit("host_status", payload.model_dump(), namespace="/webui")
         except Exception as e:
             logger.debug("Failed to notify WebUI of host online: %s", e)
+
+    async def _request_host_reconnect(self, host) -> None:
+        """Ask a disconnected host to re-establish its Socket.IO connection."""
+        await self._ensure_session()
+        if not self.session:
+            return
+        try:
+            await host_store.set_reconnect_request_time(host.id)
+            url = f"{host.url}/reconnect"
+            headers = {"X-API-Key": host.api_key}
+            async with self.session.post(
+                url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    logger.info(
+                        "Reconnect request to '%s' (%s): %s",
+                        host.name,
+                        host.id,
+                        data.get("status"),
+                    )
+                else:
+                    logger.debug(
+                        "Reconnect request to '%s' failed: HTTP %s",
+                        host.name,
+                        resp.status,
+                    )
+        except Exception as e:
+            logger.debug("Reconnect request to '%s' error: %s", host.name, e)
 
     # ── Background tasks ──────────────────────────────────────
 
@@ -254,11 +261,9 @@ class OpenAIGateway:
     async def _probe_all_instances_once(self) -> None:
         registry = await registry_store.get_registry()
         instances: list[tuple[str, str, str]] = []
-        for alias, inst_list in registry.items():
+        for inst_list in registry.values():
             for inst in inst_list:
-                instances.append(
-                    (inst["host_id"], inst["instance_id"], inst.get("url", ""))
-                )
+                instances.append((inst.host_id, inst.instance_id, inst.url))
 
         sem = asyncio.Semaphore(20)
 
@@ -356,8 +361,8 @@ class OpenAIGateway:
                 continue
             instance = instances[0]
             try:
-                url = f"{instance['url']}/v1/models"
-                headers = {"Authorization": f"Bearer {instance['api_key']}"}
+                url = f"{instance.url}/v1/models"
+                headers = {"Authorization": f"Bearer {instance.api_key}"}
                 async with self.session.get(
                     url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
                 ) as response:
@@ -413,7 +418,7 @@ class OpenAIGateway:
         *,
         exclude_keys: set[str] | None = None,
         required_endpoint: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> RegistryEntry | None:
         """Select the best instance for a model using host-aware load balancing."""
         resolved_model = await self._resolve_model_name(model)
         if not resolved_model:
@@ -428,19 +433,19 @@ class OpenAIGateway:
             available = [
                 inst
                 for inst in available
-                if required_endpoint in inst.get("supported_endpoints", [])
+                if required_endpoint in inst.supported_endpoints
             ]
             if not available:
                 return None
 
-        healthy: list[dict[str, Any]] = []
-        fallback: list[dict[str, Any]] = []
+        healthy: list[RegistryEntry] = []
+        fallback: list[RegistryEntry] = []
         for inst in available:
-            ikey = f"{inst['host_id']}-{inst['instance_id']}"
+            ikey = f"{inst.host_id}-{inst.instance_id}"
             if exclude_keys and ikey in exclude_keys:
                 continue
             is_h = await health_store.is_healthy(
-                inst["host_id"], inst["instance_id"], health_ttl_s=settings.health_ttl_s
+                inst.host_id, inst.instance_id, health_ttl_s=settings.health_ttl_s
             )
             if is_h:
                 healthy.append(inst)
@@ -451,9 +456,9 @@ class OpenAIGateway:
         if not candidates:
             return None
 
-        host_to_instances: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        host_to_instances: dict[str, list[RegistryEntry]] = defaultdict(list)
         for inst in candidates:
-            host_to_instances[inst["host_id"]].append(inst)
+            host_to_instances[inst.host_id].append(inst)
 
         candidate_host_ids = list(host_to_instances.keys())
 
@@ -491,9 +496,9 @@ class OpenAIGateway:
             return host_insts[0]
 
         min_active = float("inf")
-        best: list[dict[str, Any]] = []
+        best: list[RegistryEntry] = []
         for inst in host_insts:
-            count = await routing_store.get_active(inst["host_id"], inst["instance_id"])
+            count = await routing_store.get_active(inst.host_id, inst.instance_id)
             if count < min_active:
                 min_active = count
                 best = [inst]
@@ -544,7 +549,7 @@ class OpenAIGateway:
         self,
         request_id: str,
         model: str,
-        instance: dict[str, Any],
+        instance: RegistryEntry,
         duration: float,
         usage_fields: dict[str, Any],
         endpoint_id: str | None,
@@ -552,8 +557,8 @@ class OpenAIGateway:
         base_data: dict[str, Any] = {
             "request_id": request_id,
             "model": model,
-            "host_id": instance["host_id"],
-            "instance_id": instance["instance_id"],
+            "host_id": instance.host_id,
+            "instance_id": instance.instance_id,
             "duration": duration,
             "timestamp": self._ts(),
         }
@@ -570,7 +575,7 @@ class OpenAIGateway:
         error_message: str,
         duration: float,
         endpoint_id: str | None,
-        instance: dict[str, Any] | None = None,
+        instance: RegistryEntry | None = None,
         client_ip: str | None = None,
     ) -> None:
         data: dict[str, Any] = {
@@ -581,8 +586,8 @@ class OpenAIGateway:
             "timestamp": self._ts(),
         }
         if instance:
-            data["host_id"] = instance.get("host_id")
-            data["instance_id"] = instance.get("instance_id")
+            data["host_id"] = instance.host_id
+            data["instance_id"] = instance.instance_id
         if client_ip:
             data["client_ip"] = client_ip
         await self._broadcast_routing_event(
@@ -594,7 +599,7 @@ class OpenAIGateway:
         self,
         request_id: str,
         model: str,
-        instance: dict[str, Any],
+        instance: RegistryEntry,
         attempt: int,
         endpoint_id: str | None,
     ) -> None:
@@ -604,8 +609,8 @@ class OpenAIGateway:
                 "data": {
                     "request_id": request_id,
                     "model": model,
-                    "host_id": instance.get("host_id"),
-                    "instance_id": instance.get("instance_id"),
+                    "host_id": instance.host_id,
+                    "instance_id": instance.instance_id,
                     "reason": "connect_error",
                     "attempt": attempt,
                     "timestamp": self._ts(),
@@ -616,25 +621,23 @@ class OpenAIGateway:
 
     @asynccontextmanager
     async def _routing_context(
-        self, instance: dict[str, Any], weight: float | None
+        self, instance: RegistryEntry, weight: float | None
     ) -> AsyncIterator[None]:
         """Track active routing state in Redis, cleaning up on exit."""
-        await routing_store.increment_active(
-            instance["host_id"], instance["instance_id"]
-        )
-        await routing_store.increment_host_active(instance["host_id"])
+        await routing_store.increment_active(instance.host_id, instance.instance_id)
+        await routing_store.increment_host_active(instance.host_id)
         if weight is not None:
-            await routing_store.add_weight(instance["host_id"], weight)
+            await routing_store.add_weight(instance.host_id, weight)
         try:
             yield
         finally:
             try:
                 await routing_store.decrement_active(
-                    instance["host_id"], instance["instance_id"]
+                    instance.host_id, instance.instance_id
                 )
-                await routing_store.decrement_host_active(instance["host_id"])
+                await routing_store.decrement_host_active(instance.host_id)
                 if weight is not None:
-                    await routing_store.remove_weight(instance["host_id"], weight)
+                    await routing_store.remove_weight(instance.host_id, weight)
             except Exception:
                 pass
 
@@ -644,7 +647,7 @@ class OpenAIGateway:
         filter_endpoint: str,
         attempted: set[str],
         retried_once_flag: list[bool],
-    ) -> dict[str, Any] | None:
+    ) -> RegistryEntry | None:
         """Try to find an instance, with one registry-refresh retry."""
         instance = await self._get_next_instance(
             model, exclude_keys=attempted, required_endpoint=filter_endpoint
@@ -711,11 +714,11 @@ class OpenAIGateway:
             if not instance:
                 break
 
-            instance_key = f"{instance['host_id']}-{instance['instance_id']}"
+            instance_key = f"{instance.host_id}-{instance.instance_id}"
             attempted.add(instance_key)
-            weight = self._parse_model_size(instance["model_alias"])
+            weight = self._parse_model_size(instance.model_alias)
 
-            host = await host_db.get_host(instance["host_id"])
+            host = await host_db.get_host(instance.host_id)
             host_name = host.name if host else "unknown"
 
             async with self._routing_context(instance, weight):
@@ -726,11 +729,11 @@ class OpenAIGateway:
                             "data": {
                                 "request_id": request_id,
                                 "model": model,
-                                "resolved_model": instance["model_alias"],
-                                "host_id": instance["host_id"],
+                                "resolved_model": instance.model_alias,
+                                "host_id": instance.host_id,
                                 "host_name": host_name,
-                                "instance_id": instance["instance_id"],
-                                "instance_url": instance["url"],
+                                "instance_id": instance.instance_id,
+                                "instance_url": instance.url,
                                 "client_ip": client_ip,
                                 "timestamp": self._ts(),
                                 "attempt": attempt + 1,
@@ -739,9 +742,9 @@ class OpenAIGateway:
                         endpoint_id=endpoint_id,
                     )
 
-                    url = f"{instance['url']}{endpoint}"
+                    url = f"{instance.url}{endpoint}"
                     headers = {
-                        "Authorization": f"Bearer {instance['api_key']}",
+                        "Authorization": f"Bearer {instance.api_key}",
                         "Content-Type": "application/json",
                     }
                     timeout = aiohttp.ClientTimeout(
@@ -753,8 +756,8 @@ class OpenAIGateway:
                     ) as response:
                         if response.status == 200:
                             await health_store.mark_healthy(
-                                instance["host_id"],
-                                instance["instance_id"],
+                                instance.host_id,
+                                instance.instance_id,
                                 ttl_s=settings.health_ttl_s + 2,
                             )
                             result = await response.json()
@@ -767,7 +770,7 @@ class OpenAIGateway:
                             ):
                                 host_metrics = (
                                     await self._fetch_last_generation_metrics(
-                                        instance["host_id"], instance["instance_id"]
+                                        instance.host_id, instance.instance_id
                                     )
                                 )
                                 usage_fields = {**usage_fields, **host_metrics}
@@ -797,8 +800,8 @@ class OpenAIGateway:
 
                 except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
                     await health_store.mark_failed(
-                        instance["host_id"],
-                        instance["instance_id"],
+                        instance.host_id,
+                        instance.instance_id,
                         cooldown_s=settings.health_cooldown_s,
                     )
                     last_error = e
@@ -877,11 +880,11 @@ class OpenAIGateway:
             if not instance:
                 break
 
-            instance_key = f"{instance['host_id']}-{instance['instance_id']}"
+            instance_key = f"{instance.host_id}-{instance.instance_id}"
             attempted.add(instance_key)
-            weight = self._parse_model_size(instance["model_alias"])
+            weight = self._parse_model_size(instance.model_alias)
 
-            host = await host_db.get_host(instance["host_id"])
+            host = await host_db.get_host(instance.host_id)
             host_name = host.name if host else "unknown"
 
             async with self._routing_context(instance, weight):
@@ -892,11 +895,11 @@ class OpenAIGateway:
                             "data": {
                                 "request_id": request_id,
                                 "model": model,
-                                "resolved_model": instance["model_alias"],
-                                "host_id": instance["host_id"],
+                                "resolved_model": instance.model_alias,
+                                "host_id": instance.host_id,
                                 "host_name": host_name,
-                                "instance_id": instance["instance_id"],
-                                "instance_url": instance["url"],
+                                "instance_id": instance.instance_id,
+                                "instance_url": instance.url,
                                 "client_ip": client_ip,
                                 "timestamp": self._ts(),
                                 "attempt": attempt + 1,
@@ -905,9 +908,9 @@ class OpenAIGateway:
                         endpoint_id=endpoint_id,
                     )
 
-                    url = f"{instance['url']}{endpoint}"
+                    url = f"{instance.url}{endpoint}"
                     headers = {
-                        "Authorization": f"Bearer {instance['api_key']}",
+                        "Authorization": f"Bearer {instance.api_key}",
                         "Content-Type": "application/json",
                     }
                     timeout = aiohttp.ClientTimeout(
@@ -919,8 +922,8 @@ class OpenAIGateway:
                     ) as response:
                         if response.status == 200:
                             await health_store.mark_healthy(
-                                instance["host_id"],
-                                instance["instance_id"],
+                                instance.host_id,
+                                instance.instance_id,
                                 ttl_s=settings.health_ttl_s + 2,
                             )
                             async for line in response.content:
@@ -928,7 +931,7 @@ class OpenAIGateway:
 
                             duration = time.time() - start_time
                             usage_fields = await self._fetch_last_generation_metrics(
-                                instance["host_id"], instance["instance_id"]
+                                instance.host_id, instance.instance_id
                             )
                             await self._emit_success(
                                 request_id,
@@ -955,8 +958,8 @@ class OpenAIGateway:
 
                 except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
                     await health_store.mark_failed(
-                        instance["host_id"],
-                        instance["instance_id"],
+                        instance.host_id,
+                        instance.instance_id,
                         cooldown_s=settings.health_cooldown_s,
                     )
                     last_error = e

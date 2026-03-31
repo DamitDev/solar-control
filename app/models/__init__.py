@@ -1,3 +1,6 @@
+from .gateway import (
+    RegistryEntry as RegistryEntry,
+)
 from .host import (
     Host as Host,
     HostCreate as HostCreate,

@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     health_probe_use_http: bool = False
     health_probe_http_path: str = "/v1/models"
 
+    disconnect_grace_period_s: float = 15.0
+    reconnect_request_interval_s: float = 30.0
+
     database_url: str = "postgresql://solar:solar@localhost:5432/solar_gateway"
     redis_url: str = "redis://localhost:6379/0"
 
