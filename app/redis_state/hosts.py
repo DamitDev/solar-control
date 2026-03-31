@@ -32,13 +32,20 @@ class HostConnectionStore:
         await pipe.execute()
 
     async def unregister_host_by_sid(self, sid: str) -> str | None:
+        """Remove a SID mapping. Only clears CONNECTED_MAP if this SID is
+        still the active one for the host, preventing a stale disconnect
+        from evicting a newer connection."""
         r = redis_client()
         host_id = await r.hget(SID_MAP, sid)
         if host_id:
+            current_sid = await r.hget(CONNECTED_MAP, host_id)
             pipe = r.pipeline()
             pipe.hdel(SID_MAP, sid)
-            pipe.hdel(CONNECTED_MAP, host_id)
+            if current_sid == sid:
+                pipe.hdel(CONNECTED_MAP, host_id)
             await pipe.execute()
+            if current_sid != sid:
+                return None
         else:
             await r.hdel(SID_MAP, sid)
         return host_id
