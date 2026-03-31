@@ -38,7 +38,7 @@ class WSMessage(BaseModel):
 class WSRegistration(BaseModel):
     """Host registration message data."""
 
-    api_key: str
+    api_key: str | None = None
     host_name: str | None = None
     instances: list[dict[str, Any]] = Field(default_factory=list)
     gpu_type: str | None = None
