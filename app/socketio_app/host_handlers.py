@@ -265,9 +265,6 @@ async def host_registration(sid: str, data: dict[str, Any]):
                 roles=reg.roles or None,
                 version=reg.version,
             )
-            host = await host_db.get_host(host_id)
-            if host:
-                await _emit_host_status(host, connected=True)
 
         payload = InstancesUpdatePayload(host_id=host_id, instances=reg.instances)
         await sio.emit("instances_update", payload.model_dump(), namespace="/webui")
