@@ -9,17 +9,20 @@ Uses a write queue with periodic batch inserts for high throughput.
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, asdict
 from typing import Any
 from datetime import datetime, timezone
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func as sa_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from .connection import get_session_factory
 from .tables import GatewayEventRow, GatewayRequestRow
 
 logger = logging.getLogger(__name__)
+
+INFLIGHT_MAX_AGE_S = 900
 
 
 def _utc_now_iso() -> str:
@@ -72,6 +75,7 @@ class RequestInProgress:
     instance_id: str | None = None
     instance_url: str | None = None
     attempts: int = 0
+    created_at: float = 0.0
 
 
 @dataclass
@@ -140,6 +144,20 @@ class GatewayLogger:
             except asyncio.TimeoutError:
                 pass
             await self._flush_all()
+            self._reap_stale_inflight()
+
+    def _reap_stale_inflight(self) -> None:
+        """Remove _inflight entries older than INFLIGHT_MAX_AGE_S (leaked by client disconnects)."""
+        now = time.monotonic()
+        stale = [
+            rid
+            for rid, rip in self._inflight.items()
+            if rip.created_at > 0 and (now - rip.created_at) > INFLIGHT_MAX_AGE_S
+        ]
+        for rid in stale:
+            self._inflight.pop(rid, None)
+        if stale:
+            logger.warning("Reaped %d stale inflight request(s)", len(stale))
 
     async def _flush_all(self) -> None:
         async with self._buffer_lock:
@@ -230,7 +248,7 @@ class GatewayLogger:
             if len(self._event_buffer) >= self.MAX_BUFFER_SIZE:
                 should_flush = True
         if should_flush:
-            asyncio.create_task(self._flush_all())
+            asyncio.ensure_future(self._flush_all())
 
     async def _queue_request(self, summary_dict: dict[str, Any]) -> None:
         async with self._buffer_lock:
@@ -276,6 +294,7 @@ class GatewayLogger:
                         else None
                     ),
                     start_timestamp=timestamp,
+                    created_at=time.monotonic(),
                 )
 
             elif etype == "request_routed":
@@ -289,6 +308,7 @@ class GatewayLogger:
                         endpoint=ep,
                         endpoint_id=endpoint_id,
                         start_timestamp=timestamp,
+                        created_at=time.monotonic(),
                     )
                     self._inflight[request_id] = rip
 
@@ -400,7 +420,9 @@ class GatewayLogger:
             return "missed"
         return "error"
 
-    async def read_requests(
+    # ── SQL-level reads with server-side pagination ───────────
+
+    def _build_request_conditions(
         self,
         start: datetime,
         end: datetime,
@@ -410,17 +432,9 @@ class GatewayLogger:
         model: str | None = None,
         host_id: str | None = None,
         endpoint_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        await self._flush_all()
-
-        try:
-            session_factory = get_session_factory()
-        except RuntimeError:
-            return []
-
+    ) -> list:
         R = GatewayRequestRow
         conditions = [R.end_timestamp >= start, R.end_timestamp <= end]
-
         if status and status != "all":
             conditions.append(R.status == status)
         if request_type and request_type != "all":
@@ -431,46 +445,221 @@ class GatewayLogger:
             conditions.append(R.host_id == host_id)
         if endpoint_id:
             conditions.append(R.endpoint_id == endpoint_id)
+        return conditions
 
-        stmt = select(R).where(and_(*conditions)).order_by(R.end_timestamp.desc())
+    @staticmethod
+    def _row_to_dict(row: GatewayRequestRow) -> dict[str, Any]:
+        return {
+            "request_id": row.request_id,
+            "request_type": row.request_type,
+            "status": row.status,
+            "model": row.model,
+            "resolved_model": row.resolved_model,
+            "endpoint": row.endpoint,
+            "endpoint_id": str(row.endpoint_id) if row.endpoint_id else None,
+            "client_ip": row.client_ip,
+            "stream": row.stream,
+            "attempts": row.attempts,
+            "start_timestamp": (
+                row.start_timestamp.isoformat() if row.start_timestamp else None
+            ),
+            "end_timestamp": (
+                row.end_timestamp.isoformat() if row.end_timestamp else None
+            ),
+            "duration_s": row.duration_s,
+            "host_id": row.host_id,
+            "host_name": row.host_name,
+            "instance_id": row.instance_id,
+            "instance_url": row.instance_url,
+            "error_message": row.error_message,
+            "prompt_tokens": row.prompt_tokens,
+            "completion_tokens": row.completion_tokens,
+            "total_tokens": row.total_tokens,
+            "decode_tps": row.decode_tps,
+            "decode_ms_per_token": row.decode_ms_per_token,
+        }
+
+    async def read_requests_page(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        status: str | None = None,
+        request_type: str | None = None,
+        model: str | None = None,
+        host_id: str | None = None,
+        endpoint_id: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Read paginated requests. Returns (items, total_count)."""
+        await self._flush_all()
+
+        try:
+            session_factory = get_session_factory()
+        except RuntimeError:
+            return [], 0
+
+        conditions = self._build_request_conditions(
+            start,
+            end,
+            status=status,
+            request_type=request_type,
+            model=model,
+            host_id=host_id,
+            endpoint_id=endpoint_id,
+        )
 
         async with session_factory() as session:
+            count_stmt = select(sa_func.count()).select_from(
+                select(GatewayRequestRow.id).where(and_(*conditions)).subquery()
+            )
+            total = (await session.execute(count_stmt)).scalar() or 0
+
+            stmt = (
+                select(GatewayRequestRow)
+                .where(and_(*conditions))
+                .order_by(GatewayRequestRow.end_timestamp.desc())
+                .limit(limit)
+                .offset(offset)
+            )
             result = await session.execute(stmt)
             rows = result.scalars().all()
 
-        results: list[dict[str, Any]] = []
-        for row in rows:
-            d: dict[str, Any] = {
-                "request_id": row.request_id,
-                "request_type": row.request_type,
-                "status": row.status,
-                "model": row.model,
-                "resolved_model": row.resolved_model,
-                "endpoint": row.endpoint,
-                "endpoint_id": str(row.endpoint_id) if row.endpoint_id else None,
-                "client_ip": row.client_ip,
-                "stream": row.stream,
-                "attempts": row.attempts,
-                "start_timestamp": (
-                    row.start_timestamp.isoformat() if row.start_timestamp else None
-                ),
-                "end_timestamp": (
-                    row.end_timestamp.isoformat() if row.end_timestamp else None
-                ),
-                "duration_s": row.duration_s,
-                "host_id": row.host_id,
-                "host_name": row.host_name,
-                "instance_id": row.instance_id,
-                "instance_url": row.instance_url,
-                "error_message": row.error_message,
-                "prompt_tokens": row.prompt_tokens,
-                "completion_tokens": row.completion_tokens,
-                "total_tokens": row.total_tokens,
-                "decode_tps": row.decode_tps,
-                "decode_ms_per_token": row.decode_ms_per_token,
-            }
-            results.append(d)
-        return results
+        return [self._row_to_dict(row) for row in rows], total
+
+    async def read_stats(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        request_type: str | None = None,
+        endpoint_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Compute gateway stats entirely in SQL -- no full result set in memory."""
+        await self._flush_all()
+
+        try:
+            session_factory = get_session_factory()
+        except RuntimeError:
+            return {"completed": 0, "missed": 0, "error": 0}
+
+        R = GatewayRequestRow
+        conditions = self._build_request_conditions(
+            start,
+            end,
+            request_type=request_type,
+            endpoint_id=endpoint_id,
+        )
+
+        async with session_factory() as session:
+            agg_stmt = select(
+                sa_func.count().filter(R.status == "success").label("completed"),
+                sa_func.count().filter(R.status == "missed").label("missed"),
+                sa_func.count().filter(R.status == "error").label("error"),
+                sa_func.sum(R.prompt_tokens)
+                .filter(R.status == "success")
+                .label("token_in_total"),
+                sa_func.sum(R.completion_tokens)
+                .filter(R.status == "success")
+                .label("token_out_total"),
+                sa_func.count()
+                .filter(R.status == "success", R.prompt_tokens.isnot(None))
+                .label("p_count"),
+                sa_func.count()
+                .filter(R.status == "success", R.completion_tokens.isnot(None))
+                .label("c_count"),
+            ).where(and_(*conditions))
+            row = (await session.execute(agg_stmt)).one()
+
+            completed = row.completed or 0
+            missed = row.missed or 0
+            error = row.error or 0
+            token_in_total = int(row.token_in_total or 0)
+            token_out_total = int(row.token_out_total or 0)
+            p_count = row.p_count or 0
+            c_count = row.c_count or 0
+
+            model_key = sa_func.coalesce(R.resolved_model, R.model, "unknown")
+            model_stmt = (
+                select(
+                    model_key.label("model_key"),
+                    sa_func.count().label("completed"),
+                    sa_func.coalesce(sa_func.sum(R.prompt_tokens), 0).label("token_in"),
+                    sa_func.coalesce(sa_func.sum(R.completion_tokens), 0).label(
+                        "token_out"
+                    ),
+                    sa_func.coalesce(sa_func.avg(R.duration_s), 0).label(
+                        "avg_duration_s"
+                    ),
+                )
+                .where(and_(*conditions, R.status == "success"))
+                .group_by(model_key)
+            )
+            model_rows = (await session.execute(model_stmt)).all()
+
+            host_stmt = (
+                select(
+                    R.host_id,
+                    sa_func.max(R.host_name).label("host_name"),
+                    sa_func.count().label("completed"),
+                    sa_func.coalesce(sa_func.sum(R.prompt_tokens), 0).label("token_in"),
+                    sa_func.coalesce(sa_func.sum(R.completion_tokens), 0).label(
+                        "token_out"
+                    ),
+                    sa_func.coalesce(sa_func.avg(R.duration_s), 0).label(
+                        "avg_duration_s"
+                    ),
+                )
+                .where(and_(*conditions, R.host_id.isnot(None)))
+                .group_by(R.host_id)
+            )
+            host_rows = (await session.execute(host_stmt)).all()
+
+            E = GatewayEventRow
+            ev_conditions = [
+                E.timestamp >= start,
+                E.timestamp <= end,
+                E.event_type == "request_reroute",
+            ]
+            if endpoint_id:
+                ev_conditions.append(E.endpoint_id == endpoint_id)
+            reroute_stmt = select(sa_func.count(sa_func.distinct(E.request_id))).where(
+                and_(*ev_conditions)
+            )
+            rerouted_unique = (await session.execute(reroute_stmt)).scalar() or 0
+
+        return {
+            "completed": completed,
+            "missed": missed,
+            "error": error,
+            "rerouted_requests": rerouted_unique,
+            "token_in_total": token_in_total,
+            "token_out_total": token_out_total,
+            "avg_tokens_in": (token_in_total / p_count) if p_count else 0,
+            "avg_tokens_out": (token_out_total / c_count) if c_count else 0,
+            "models": [
+                {
+                    "model": r.model_key,
+                    "completed": r.completed,
+                    "token_in": int(r.token_in),
+                    "token_out": int(r.token_out),
+                    "avg_duration_s": float(r.avg_duration_s),
+                }
+                for r in model_rows
+            ],
+            "hosts": [
+                {
+                    "host_id": r.host_id,
+                    "host_name": r.host_name or r.host_id,
+                    "completed": r.completed,
+                    "token_in": int(r.token_in),
+                    "token_out": int(r.token_out),
+                    "avg_duration_s": float(r.avg_duration_s),
+                }
+                for r in host_rows
+            ],
+        }
 
     async def read_events(
         self,
@@ -479,6 +668,7 @@ class GatewayLogger:
         *,
         types: list[str] | None = None,
         endpoint_id: str | None = None,
+        limit: int = 1000,
     ) -> list[dict[str, Any]]:
         await self._flush_all()
 
@@ -495,14 +685,16 @@ class GatewayLogger:
         if endpoint_id:
             conditions.append(E.endpoint_id == endpoint_id)
 
-        stmt = select(E).where(and_(*conditions)).order_by(E.timestamp.asc())
+        stmt = (
+            select(E).where(and_(*conditions)).order_by(E.timestamp.desc()).limit(limit)
+        )
 
         async with session_factory() as session:
             result = await session.execute(stmt)
             rows = result.scalars().all()
 
         results: list[dict[str, Any]] = []
-        for row in rows:
+        for row in reversed(rows):
             evt: dict[str, Any] = {
                 "type": row.event_type,
                 "data": row.data if isinstance(row.data, dict) else {},

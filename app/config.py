@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     health_ttl_s: float = 3.0
     health_cooldown_s: float = 5.0
     route_connect_timeout_s: float = 0.5
+    route_total_timeout_s: float = 600.0
     route_max_attempts: int = 3
     route_retry_delay_s: float = 0.15
 
@@ -31,6 +32,9 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql://solar:solar@localhost:5432/solar_gateway"
     redis_url: str = "redis://localhost:6379/0"
+
+    db_pool_size: int = 20
+    db_max_overflow: int = 10
 
 
 settings = Settings()

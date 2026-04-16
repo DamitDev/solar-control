@@ -42,8 +42,12 @@ async def lifespan(app: FastAPI):
 
     logger.info("Starting Solar Control v%s ...", __version__)
 
-    await init_db(settings.database_url)
-    logger.info("PostgreSQL connected")
+    await init_db(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
+    logger.info("PostgreSQL connected (pool_size=%d)", settings.db_pool_size)
 
     # Initialize Redis
     await init_redis(settings.redis_url)

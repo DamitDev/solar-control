@@ -120,7 +120,10 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> str | No
     try:
         from app.gateway import gateway
 
-        asyncio.create_task(gateway.refresh_model_registry())
+        gateway._spawn_task(
+            gateway.refresh_model_registry(),
+            name="registry-refresh-approve",
+        )
     except Exception:
         pass
 
@@ -272,7 +275,10 @@ async def host_registration(sid: str, data: dict[str, Any]):
         try:
             from app.gateway import gateway
 
-            asyncio.create_task(gateway.refresh_model_registry())
+            gateway._spawn_task(
+                gateway.refresh_model_registry(),
+                name="registry-refresh-registration",
+            )
         except Exception:
             pass
         return
@@ -346,8 +352,8 @@ async def host_log_batch(sid: str, data: dict[str, Any]):
     host = await host_db.get_host(host_id)
     host_name = host.name if host else None
 
-    for entry in entries:
-        payload = LogPayload(
+    payloads = [
+        LogPayload(
             host_id=host_id,
             host_name=host_name,
             instance_id=entry.get("instance_id"),
@@ -357,8 +363,13 @@ async def host_log_batch(sid: str, data: dict[str, Any]):
                 "line": entry.get("line"),
                 "level": entry.get("level", "info"),
             },
-        )
-        await sio.emit("log", payload.model_dump(), namespace="/webui")
+        ).model_dump()
+        for entry in entries
+    ]
+    await asyncio.gather(
+        *[sio.emit("log", p, namespace="/webui") for p in payloads],
+        return_exceptions=True,
+    )
 
 
 @sio.on("instance_state_batch", namespace="/hosts")
@@ -375,15 +386,20 @@ async def host_instance_state_batch(sid: str, data: dict[str, Any]):
     host = await host_db.get_host(host_id)
     host_name = host.name if host else None
 
-    for entry in entries:
-        payload = InstanceStatePayload(
+    payloads = [
+        InstanceStatePayload(
             host_id=host_id,
             host_name=host_name,
             instance_id=entry.get("instance_id"),
             timestamp=entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
             data=entry.get("data", entry),
-        )
-        await sio.emit("instance_state", payload.model_dump(), namespace="/webui")
+        ).model_dump()
+        for entry in entries
+    ]
+    await asyncio.gather(
+        *[sio.emit("instance_state", p, namespace="/webui") for p in payloads],
+        return_exceptions=True,
+    )
 
 
 @sio.on("host_health", namespace="/hosts")
@@ -449,6 +465,9 @@ async def host_instances_update(sid: str, data: dict[str, Any]):
     try:
         from app.gateway import gateway
 
-        asyncio.create_task(gateway.refresh_model_registry())
+        gateway._spawn_task(
+            gateway.refresh_model_registry(),
+            name="registry-refresh-instances",
+        )
     except Exception:
         pass

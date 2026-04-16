@@ -23,14 +23,23 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-async def init_db(database_url: str) -> AsyncEngine:
+async def init_db(
+    database_url: str,
+    *,
+    pool_size: int = 20,
+    max_overflow: int = 10,
+) -> AsyncEngine:
     global _engine, _session_factory
 
     sa_url = database_url
     if sa_url.startswith("postgresql://"):
         sa_url = sa_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-    _engine = create_async_engine(sa_url, pool_size=10, max_overflow=5)
+    _engine = create_async_engine(
+        sa_url,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+    )
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine
 

@@ -87,7 +87,12 @@ class RoutingStore:
 
     # --- Round-robin per model ---
 
+    RR_TTL_S = 3600
+
     async def next_rr_index(self, model: str) -> int:
         """Get and increment the round-robin index for a model."""
         r = redis_client()
-        return await r.incr(f"{RR_PREFIX}{model}")
+        key = f"{RR_PREFIX}{model}"
+        val = await r.incr(key)
+        await r.expire(key, self.RR_TTL_S)
+        return val

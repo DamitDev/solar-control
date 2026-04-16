@@ -34,116 +34,17 @@ async def get_stats(
     )
     end = _parse_iso(to_ts) or now
 
-    summaries = await gateway_logger.read_requests(
+    stats = await gateway_logger.read_stats(
         start,
         end,
         request_type=request_type if request_type and request_type != "all" else None,
         endpoint_id=endpoint_id,
     )
 
-    completed = sum(1 for s in summaries if s.get("status") == "success")
-    missed = sum(1 for s in summaries if s.get("status") == "missed")
-    error = sum(1 for s in summaries if s.get("status") == "error")
-
-    events = await gateway_logger.read_events(
-        start, end, types=["request_reroute"], endpoint_id=endpoint_id
-    )
-    rerouted_unique = len(
-        {
-            e.get("data", {}).get("request_id")
-            for e in events
-            if e.get("data", {}).get("request_id")
-        }
-    )
-
-    succ = [s for s in summaries if s.get("status") == "success"]
-    p_vals = [
-        int(s["prompt_tokens"])
-        for s in succ
-        if isinstance(s.get("prompt_tokens"), (int, float))
-    ]
-    c_vals = [
-        int(s["completion_tokens"])
-        for s in succ
-        if isinstance(s.get("completion_tokens"), (int, float))
-    ]
-    token_in_total = sum(p_vals) if p_vals else 0
-    token_out_total = sum(c_vals) if c_vals else 0
-
-    by_model: dict[str, dict[str, Any]] = {}
-    for s in succ:
-        key = s.get("resolved_model") or s.get("model") or "unknown"
-        rec = by_model.setdefault(
-            key,
-            {
-                "model": key,
-                "completed": 0,
-                "token_in": 0,
-                "token_out": 0,
-                "dur_sum": 0.0,
-            },
-        )
-        rec["completed"] += 1
-        if isinstance(s.get("prompt_tokens"), (int, float)):
-            rec["token_in"] += int(s["prompt_tokens"])
-        if isinstance(s.get("completion_tokens"), (int, float)):
-            rec["token_out"] += int(s["completion_tokens"])
-        if isinstance(s.get("duration_s"), (int, float)):
-            rec["dur_sum"] += float(s["duration_s"])
-
-    model_rows = [
-        {**v, "avg_duration_s": v["dur_sum"] / v["completed"] if v["completed"] else 0}
-        for v in by_model.values()
-    ]
-    for r in model_rows:
-        r.pop("dur_sum", None)
-
-    by_host: dict[str, dict[str, Any]] = {}
-    for s in summaries:
-        hid = s.get("host_id")
-        if not hid:
-            continue
-        rec = by_host.setdefault(
-            hid,
-            {
-                "host_id": hid,
-                "host_name": s.get("host_name") or hid,
-                "completed": 0,
-                "token_in": 0,
-                "token_out": 0,
-                "dur_sum": 0.0,
-            },
-        )
-        if not rec["host_name"] or rec["host_name"] == hid:
-            rec["host_name"] = s.get("host_name") or hid
-        rec["completed"] += 1
-        if isinstance(s.get("prompt_tokens"), (int, float)):
-            rec["token_in"] += int(s["prompt_tokens"])
-        if isinstance(s.get("completion_tokens"), (int, float)):
-            rec["token_out"] += int(s["completion_tokens"])
-        if isinstance(s.get("duration_s"), (int, float)):
-            rec["dur_sum"] += float(s["duration_s"])
-
-    host_rows = [
-        {**v, "avg_duration_s": v["dur_sum"] / v["completed"] if v["completed"] else 0}
-        for v in by_host.values()
-    ]
-    for r in host_rows:
-        r.pop("dur_sum", None)
-
     return {
         "from": start.isoformat(),
         "to": end.isoformat(),
-        "completed": completed,
-        "missed": missed,
-        "error": error,
-        "rerouted_requests": rerouted_unique,
-        "token_in_total": token_in_total,
-        "token_out_total": token_out_total,
-        "avg_tokens_in": (token_in_total / len(p_vals)) if p_vals else 0,
-        "avg_tokens_out": (token_out_total / len(c_vals)) if c_vals else 0,
-        "models": model_rows,
-        "hosts": host_rows,
+        **stats,
     }
 
 
@@ -163,7 +64,10 @@ async def list_requests(
     start = _parse_iso(from_ts) or (now - timedelta(days=1))
     end = _parse_iso(to_ts) or now
 
-    items = await gateway_logger.read_requests(
+    safe_limit = max(1, min(limit, 1000))
+    offset = max(0, (page - 1) * safe_limit)
+
+    items, total = await gateway_logger.read_requests_page(
         start,
         end,
         status=status if status != "all" else None,
@@ -171,19 +75,17 @@ async def list_requests(
         model=model,
         host_id=host_id,
         endpoint_id=endpoint_id,
+        limit=safe_limit,
+        offset=offset,
     )
-
-    total = len(items)
-    start_idx = max(0, (page - 1) * max(1, limit))
-    page_items = items[start_idx : start_idx + max(1, limit)]
 
     return {
         "from": start.isoformat(),
         "to": end.isoformat(),
         "page": page,
-        "limit": limit,
+        "limit": safe_limit,
         "total": total,
-        "items": page_items,
+        "items": items,
     }
 
 
@@ -200,12 +102,18 @@ async def recent_events(
     end = _parse_iso(to_ts) or now
     wanted = [t.strip() for t in types.split(",") if t.strip()]
 
+    safe_limit = max(1, min(limit, 5000))
+
     events = await gateway_logger.read_events(
-        start, end, types=wanted, endpoint_id=endpoint_id
+        start,
+        end,
+        types=wanted,
+        endpoint_id=endpoint_id,
+        limit=safe_limit,
     )
     return {
         "from": start.isoformat(),
         "to": end.isoformat(),
         "types": wanted,
-        "items": events[-limit:] if len(events) > limit else events,
+        "items": events,
     }
