@@ -28,6 +28,8 @@ async def init_db(
     *,
     pool_size: int = 20,
     max_overflow: int = 10,
+    pool_recycle: int = 300,
+    pool_timeout: int = 30,
 ) -> AsyncEngine:
     global _engine, _session_factory
 
@@ -39,6 +41,9 @@ async def init_db(
         sa_url,
         pool_size=pool_size,
         max_overflow=max_overflow,
+        pool_pre_ping=True,
+        pool_recycle=pool_recycle,
+        pool_timeout=pool_timeout,
     )
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine

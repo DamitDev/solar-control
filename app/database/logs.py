@@ -248,7 +248,7 @@ class GatewayLogger:
             if len(self._event_buffer) >= self.MAX_BUFFER_SIZE:
                 should_flush = True
         if should_flush:
-            asyncio.ensure_future(self._flush_all())
+            asyncio.create_task(self._flush_all())
 
     async def _queue_request(self, summary_dict: dict[str, Any]) -> None:
         async with self._buffer_lock:

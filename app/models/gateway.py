@@ -1,6 +1,7 @@
 """Gateway-specific models for the model registry and routing."""
 
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -43,11 +44,12 @@ class RegistryEntry(BaseModel):
         port = instance.get("port")
         if not port:
             return None
-        host_base = host_url.rsplit(":", 1)[0]
+        parsed = urlparse(host_url)
+        instance_url = f"{parsed.scheme}://{parsed.hostname}:{port}"
         return cls(
             host_id=host_id,
             instance_id=instance["id"],
-            url=f"{host_base}:{port}",
+            url=instance_url,
             api_key=host_api_key,
             model_alias=instance.get("alias", "unknown"),
             supported_endpoints=instance.get(
@@ -72,11 +74,12 @@ class RegistryEntry(BaseModel):
         if not port:
             return None
         config = instance.get("config", {})
-        host_base = host_url.rsplit(":", 1)[0]
+        parsed = urlparse(host_url)
+        instance_url = f"{parsed.scheme}://{parsed.hostname}:{port}"
         return cls(
             host_id=host_id,
             instance_id=instance["id"],
-            url=f"{host_base}:{port}",
+            url=instance_url,
             api_key=config.get("api_key", ""),
             model_alias=config.get("alias", "unknown"),
             supported_endpoints=instance.get(

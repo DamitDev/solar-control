@@ -5,6 +5,7 @@ The resolved endpoint_id is stored in request.state by the auth middleware
 and passed through to the gateway for logging.
 """
 
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -44,7 +45,8 @@ def _safe_stream(
             async for chunk in stream:
                 yield chunk
         except Exception as e:
-            yield f'data: {{"error": "{str(e)}"}}\n\n'.encode()
+            payload = json.dumps({"error": str(e)})
+            yield f"data: {payload}\n\n".encode()
         finally:
             await stream.aclose()
 

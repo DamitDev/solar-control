@@ -32,6 +32,9 @@ def _task_done_callback(task: asyncio.Task) -> None:
         logger.error("Background task %s failed: %s", task.get_name(), exc)
 
 
+_RETRYABLE_STATUSES = frozenset({502, 503, 504})
+
+
 class OpenAIGateway:
 
     def __init__(self) -> None:
@@ -672,15 +675,27 @@ class OpenAIGateway:
                 await routing_store.decrement_active(
                     instance.host_id, instance.instance_id
                 )
-                await routing_store.decrement_host_active(instance.host_id)
-                if weight is not None:
-                    await routing_store.remove_weight(instance.host_id, weight)
             except Exception:
                 logger.warning(
-                    "Failed to decrement routing counters for %s/%s",
+                    "Failed to decrement instance active for %s/%s",
                     instance.host_id,
                     instance.instance_id,
                 )
+            try:
+                await routing_store.decrement_host_active(instance.host_id)
+            except Exception:
+                logger.warning(
+                    "Failed to decrement host active for %s",
+                    instance.host_id,
+                )
+            if weight is not None:
+                try:
+                    await routing_store.remove_weight(instance.host_id, weight)
+                except Exception:
+                    logger.warning(
+                        "Failed to remove weight for %s",
+                        instance.host_id,
+                    )
 
     async def _find_instance_or_retry(
         self,
@@ -829,6 +844,28 @@ class OpenAIGateway:
                                 endpoint_id,
                             )
                             return result
+                        elif response.status in _RETRYABLE_STATUSES:
+                            error_text = await response.text()
+                            logger.warning(
+                                "Retryable %d from %s: %s",
+                                response.status,
+                                instance.url,
+                                error_text[:200],
+                            )
+                            await health_store.mark_failed(
+                                instance.host_id,
+                                instance.instance_id,
+                                cooldown_s=settings.health_cooldown_s,
+                            )
+                            last_error = Exception(f"Upstream {response.status}")
+                            await self._emit_reroute(
+                                request_id,
+                                model,
+                                instance,
+                                attempt + 1,
+                                endpoint_id,
+                            )
+                            continue
                         else:
                             error_text = await response.text()
                             duration = time.time() - start_time
@@ -987,6 +1024,28 @@ class OpenAIGateway:
                                 endpoint_id,
                             )
                             return
+                        elif response.status in _RETRYABLE_STATUSES:
+                            error_text = await response.text()
+                            logger.warning(
+                                "Retryable %d from %s: %s",
+                                response.status,
+                                instance.url,
+                                error_text[:200],
+                            )
+                            await health_store.mark_failed(
+                                instance.host_id,
+                                instance.instance_id,
+                                cooldown_s=settings.health_cooldown_s,
+                            )
+                            last_error = Exception(f"Upstream {response.status}")
+                            await self._emit_reroute(
+                                request_id,
+                                model,
+                                instance,
+                                attempt + 1,
+                                endpoint_id,
+                            )
+                            continue
                         else:
                             error_text = await response.text()
                             duration = time.time() - start_time

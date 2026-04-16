@@ -24,6 +24,23 @@ PENDING_SID_MAP = "solar:hosts:pending_sids"
 class HostConnectionStore:
     """Host Socket.IO connection state in Redis."""
 
+    # Atomic compare-and-delete: only remove from CONNECTED_MAP if the
+    # current SID still matches, preventing a stale disconnect on one
+    # replica from evicting a newer connection registered on another.
+    _UNREGISTER_SCRIPT = """
+    local host_id = redis.call('hget', KEYS[1], ARGV[1])
+    if not host_id then
+        return nil
+    end
+    redis.call('hdel', KEYS[1], ARGV[1])
+    local current_sid = redis.call('hget', KEYS[2], host_id)
+    if current_sid == ARGV[1] then
+        redis.call('hdel', KEYS[2], host_id)
+        return host_id
+    end
+    return nil
+    """
+
     async def register_host(self, sid: str, host_id: str) -> None:
         r = redis_client()
         pipe = r.pipeline()
@@ -32,23 +49,17 @@ class HostConnectionStore:
         await pipe.execute()
 
     async def unregister_host_by_sid(self, sid: str) -> str | None:
-        """Remove a SID mapping. Only clears CONNECTED_MAP if this SID is
-        still the active one for the host, preventing a stale disconnect
-        from evicting a newer connection."""
+        """Atomically remove a SID mapping. Only clears CONNECTED_MAP if
+        this SID is still the active one for the host (Lua CAS)."""
         r = redis_client()
-        host_id = await r.hget(SID_MAP, sid)
-        if host_id:
-            current_sid = await r.hget(CONNECTED_MAP, host_id)
-            pipe = r.pipeline()
-            pipe.hdel(SID_MAP, sid)
-            if current_sid == sid:
-                pipe.hdel(CONNECTED_MAP, host_id)
-            await pipe.execute()
-            if current_sid != sid:
-                return None
-        else:
-            await r.hdel(SID_MAP, sid)
-        return host_id
+        result = await r.eval(
+            self._UNREGISTER_SCRIPT,
+            2,
+            SID_MAP,
+            CONNECTED_MAP,
+            sid,
+        )
+        return result
 
     async def get_host_id_for_sid(self, sid: str) -> str | None:
         r = redis_client()
