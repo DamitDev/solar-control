@@ -82,20 +82,106 @@ async def test_resolve_huggingface_success():
 
 
 @pytest.mark.anyio
-async def test_resolve_huggingface_error():
+async def test_resolve_huggingface_404():
     uri = "huggingface://microsoft/phi-3"
+    host_url = "http://host:8000"
 
     with patch("aiohttp.ClientSession.post") as mock_post:
         mock_resp = AsyncMock()
         mock_resp.status = 404
+        mock_resp.json.side_effect = Exception("Not JSON")
         mock_resp.text.return_value = "Not Found"
         mock_post.return_value.__aenter__.return_value = mock_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await resolve(uri, host_url, "key")
+
+        assert exc.value.status_code == 404
+        assert f"Model pull failed on host '{host_url}' [404]: Not Found" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_huggingface_507():
+    uri = "huggingface://microsoft/phi-3"
+    host_url = "http://host:8000"
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_resp = AsyncMock()
+        mock_resp.status = 507
+        mock_resp.json.return_value = {"error": "Insufficient disk space"}
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await resolve(uri, host_url, "key")
+
+        assert exc.value.status_code == 507
+        assert "Insufficient disk space" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_huggingface_no_path():
+    uri = "huggingface://microsoft/phi-3"
+    host_url = "http://host:8000"
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json.return_value = {}  # Missing "path"
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await resolve(uri, host_url, "key")
+
+        assert exc.value.status_code == 502
+        assert "no path for model pull" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_huggingface_connection_error():
+    uri = "huggingface://microsoft/phi-3"
+    import aiohttp
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.side_effect = aiohttp.ClientConnectionError("Connection refused")
 
         with pytest.raises(HTTPException) as exc:
             await resolve(uri, "http://host:8000", "key")
 
         assert exc.value.status_code == 502
-        assert "Model pull failed on host" in exc.value.detail
+        assert "is unreachable" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_huggingface_timeout():
+    uri = "huggingface://microsoft/phi-3"
+    import asyncio
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.side_effect = asyncio.TimeoutError()
+
+        with pytest.raises(HTTPException) as exc:
+            await resolve(uri, "http://host:8000", "key")
+
+        assert exc.value.status_code == 502
+        assert "is unreachable" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_huggingface_structured_error():
+    uri = "huggingface://microsoft/phi-3"
+    host_url = "http://host:8000"
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_resp = AsyncMock()
+        mock_resp.status = 401
+        mock_resp.json.return_value = {"detail": "Invalid API Key"}
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await resolve(uri, host_url, "key")
+
+        assert exc.value.status_code == 502  # 401 is not in PROPAGATED_CODES
+        assert "Invalid API Key" in exc.value.detail
 
 
 @pytest.mark.anyio

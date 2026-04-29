@@ -38,10 +38,22 @@ async def resolve_huggingface(
                         )
                     return f"local://{path}"
 
-                text = await response.text()
+                # Propagate specific error codes, wrap others in 502
+                PROPAGATED_CODES = {404, 507}
+                try:
+                    err = await response.json()
+                    detail = (
+                        err.get("detail") or err.get("error") or await response.text()
+                    )
+                except Exception:
+                    detail = await response.text()
+
+                out_code = (
+                    response.status if response.status in PROPAGATED_CODES else 502
+                )
                 raise HTTPException(
-                    status_code=502,
-                    detail=f"Model pull failed on host '{host_url}': {text}",
+                    status_code=out_code,
+                    detail=f"Model pull failed on host '{host_url}' [{response.status}]: {detail}",
                 )
     except HTTPException:
         raise
