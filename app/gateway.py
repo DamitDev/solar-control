@@ -68,6 +68,33 @@ class OpenAIGateway:
 
     # ── Model registry ────────────────────────────────────────
 
+    @staticmethod
+    def _ws_cache_from_http_instances(
+        instances: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert solar-host REST instance payloads to the WS cache shape."""
+        cached: list[dict[str, Any]] = []
+        for instance in instances:
+            config = instance.get("config") or {}
+            cached.append(
+                {
+                    "id": instance.get("id"),
+                    "alias": config.get("alias", instance.get("alias", "unknown")),
+                    "status": instance.get("status"),
+                    "port": instance.get("port"),
+                    "supported_endpoints": instance.get(
+                        "supported_endpoints",
+                        RegistryEntry.DEFAULT_ENDPOINTS,
+                    ),
+                    "backend_type": config.get(
+                        "backend_type",
+                        instance.get("backend_type", "llamacpp"),
+                    ),
+                    "api_key": config.get("api_key"),
+                }
+            )
+        return cached
+
     async def refresh_model_registry(self) -> None:
         """Refresh the model registry from all hosts and store in Redis."""
         await self._ensure_session()
@@ -81,9 +108,11 @@ class OpenAIGateway:
 
         new_model_map: dict[str, list[RegistryEntry]] = defaultdict(list)
         hosts = await host_db.get_all_hosts()
+        refresh_failed = False
 
         ws_hosts = []
         http_hosts = []
+        missing_cache_hosts = []
         for host in hosts:
             if await is_host_connected(host.id):
                 ws_hosts.append(host)
@@ -93,6 +122,13 @@ class OpenAIGateway:
         for host in ws_hosts:
             ws_instances = await get_host_instances(host.id)
             await host_db.update_host_status(host.id, HostStatus.ONLINE)
+            if not ws_instances:
+                logger.warning(
+                    "Host %s is connected but has no cached instances; polling HTTP",
+                    host.id,
+                )
+                missing_cache_hosts.append(host)
+                continue
 
             for instance in ws_instances:
                 if instance.get("status") == "running":
@@ -102,13 +138,13 @@ class OpenAIGateway:
                     if entry:
                         new_model_map[entry.model_alias].append(entry)
 
-        if http_hosts:
+        if http_hosts or missing_cache_hosts:
             now = time.time()
             grace = settings.disconnect_grace_period_s
             reconnect_interval = settings.reconnect_request_interval_s
 
             grace_hosts = []
-            poll_hosts = []
+            poll_hosts = list(missing_cache_hosts)
 
             for host in http_hosts:
                 dc_ts = await host_store.get_disconnect_time(host.id)
@@ -137,6 +173,7 @@ class OpenAIGateway:
             if poll_hosts:
 
                 async def poll_host(host):
+                    nonlocal refresh_failed
                     result_entries: list[RegistryEntry] = []
                     try:
                         url = f"{host.url}/instances"
@@ -148,6 +185,10 @@ class OpenAIGateway:
                         ) as response:
                             if response.status == 200:
                                 instances = await response.json()
+                                await host_store.set_host_instances(
+                                    host.id,
+                                    self._ws_cache_from_http_instances(instances),
+                                )
                                 prev_status = host.status
                                 await host_db.update_host_status(
                                     host.id, HostStatus.ONLINE
@@ -162,10 +203,12 @@ class OpenAIGateway:
                                         if entry:
                                             result_entries.append(entry)
                             else:
+                                refresh_failed = True
                                 await host_db.update_host_status(
                                     host.id, HostStatus.ERROR
                                 )
                     except Exception:
+                        refresh_failed = True
                         cached = await get_host_instances(host.id)
                         if cached:
                             for instance in cached:
@@ -189,6 +232,16 @@ class OpenAIGateway:
                         continue
                     for entry in result:
                         new_model_map[entry.model_alias].append(entry)
+
+        if not new_model_map and hosts and refresh_failed:
+            previous_registry = await registry_store.get_registry()
+            if previous_registry:
+                logger.warning(
+                    "Registry refresh produced no entries after host failures; "
+                    "keeping previous registry with %d models",
+                    len(previous_registry),
+                )
+                return
 
         await registry_store.set_registry(dict(new_model_map))
 
