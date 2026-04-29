@@ -7,6 +7,7 @@ from app.routes.management.models import (
     _check_disk_space,
     distribute_model,
     DistributeRequest,
+    _StructuredPullError,
 )
 from app.model_resolvers.parser import parse
 
@@ -74,10 +75,10 @@ async def test_pull_on_host_404_propagated(mock_host):
         mock_resp.json.return_value = {"detail": "Model not found"}
         mock_post.return_value.__aenter__.return_value = mock_resp
 
-        with pytest.raises(HTTPException) as exc:
-            await _pull_on_host(parsed, uri, mock_host)
-        assert exc.value.status_code == 404
-        assert "Model not found" in exc.value.detail
+        result = await _pull_on_host(parsed, uri, mock_host)
+        assert isinstance(result, _StructuredPullError)
+        assert result.status_code == 404
+        assert "Model not found" in result.detail
 
 
 @pytest.mark.anyio
@@ -91,10 +92,10 @@ async def test_pull_on_host_507_propagated(mock_host):
         mock_resp.json.return_value = {"error": "Disk full"}
         mock_post.return_value.__aenter__.return_value = mock_resp
 
-        with pytest.raises(HTTPException) as exc:
-            await _pull_on_host(parsed, uri, mock_host)
-        assert exc.value.status_code == 507
-        assert "Disk full" in exc.value.detail
+        result = await _pull_on_host(parsed, uri, mock_host)
+        assert isinstance(result, _StructuredPullError)
+        assert result.status_code == 507
+        assert "Disk full" in result.detail
 
 
 @pytest.mark.anyio
@@ -118,10 +119,12 @@ async def test_pull_on_host_local_uri(mock_host):
     uri = "local:///path/to/model"
     parsed = parse(uri)
 
-    with pytest.raises(HTTPException) as exc:
-        await _pull_on_host(parsed, uri, mock_host)
-    assert exc.value.status_code == 400
-    assert "Cannot distribute local:// URIs" in exc.value.detail
+    result = await _pull_on_host(parsed, uri, mock_host)
+    assert isinstance(result, _StructuredPullError)
+    assert result.status_code == 400
+    assert "Cannot distribute local://" in result.detail
+    assert result.source_uri == "local:///path/to/model"
+    assert result.error == "validation_error"
 
 
 @pytest.mark.anyio
@@ -129,10 +132,12 @@ async def test_pull_on_host_repo_uri(mock_host):
     uri = "repo://model:v1"
     parsed = parse(uri)
 
-    with pytest.raises(HTTPException) as exc:
-        await _pull_on_host(parsed, uri, mock_host)
-    assert exc.value.status_code == 501
-    assert "repo:// distribution requires Data Repository" in exc.value.detail
+    result = await _pull_on_host(parsed, uri, mock_host)
+    assert isinstance(result, _StructuredPullError)
+    assert result.status_code == 501
+    assert "repo:// distribution requires Data Repository" in result.detail
+    assert result.source_uri == "repo://model:v1"
+    assert result.error == "not_implemented"
 
 
 @pytest.mark.anyio
@@ -175,6 +180,68 @@ async def test_distribute_model_route_batch(mock_host):
         assert results[0].path == "/path1"
         assert results[1].source_uri == "huggingface://phi-4"
         assert results[1].path == "/path2"
+
+
+@pytest.mark.anyio
+async def test_distribute_model_partial_results(mock_host):
+    """Test that partial results are returned when some items in array fail."""
+    req = DistributeRequest(
+        target_host_id="host-1",
+        source_uri=[
+            "huggingface://phi-3",
+            "repo://test-model:v1",
+            "huggingface://phi-4",
+        ],
+    )
+
+    with (
+        patch("app.database.hosts.host_db.get_host", return_value=mock_host),
+        patch("app.routes.management.models._check_disk_space", return_value=10.0),
+        patch("app.routes.management.models._pull_on_host") as mock_pull,
+    ):
+
+        mock_pull.side_effect = [
+            ("/path1", False),
+            _StructuredPullError(
+                error="not_implemented",
+                detail="repo:// distribution requires Data Repository integration (Phase 1)",
+                source_uri="repo://test-model:v1",
+                status_code=501,
+            ),
+            ("/path3", True),
+        ]
+
+        results = await distribute_model(req)
+        # Only successful results returned
+        assert len(results) == 2
+        assert results[0].source_uri == "huggingface://phi-3"
+        assert results[0].path == "/path1"
+        assert results[1].source_uri == "huggingface://phi-4"
+        assert results[1].path == "/path3"
+        assert results[1].cached is True
+
+
+@pytest.mark.anyio
+async def test_distribute_model_single_success(mock_host):
+    """Test that a single source_uri returns result even when parse raises (bad URI)."""
+    req = DistributeRequest(
+        target_host_id="host-1",
+        source_uri="huggingface://phi-3",
+    )
+
+    with (
+        patch("app.database.hosts.host_db.get_host", return_value=mock_host),
+        patch("app.routes.management.models._check_disk_space", return_value=10.0),
+        patch(
+            "app.routes.management.models._pull_on_host", return_value=("/path", False)
+        ),
+    ):
+
+        results = await distribute_model(req)
+        assert len(results) == 1
+        assert results[0].source_uri == "huggingface://phi-3"
+        assert results[0].path == "/path"
+        assert results[0].cached is False
 
 
 @pytest.mark.anyio
@@ -239,13 +306,9 @@ async def test_pull_on_host_404_structured_error(mock_host):
         }
         mock_post.return_value.__aenter__.return_value = mock_resp
 
-        with pytest.raises(HTTPException) as exc:
-            await _pull_on_host(parsed, uri, mock_host)
-        assert exc.value.status_code == 404
-        # The HTTPException should have the structured error as detail
-        assert exc.value.detail == {
-            "error": "not_found",
-            "detail": "HuggingFace repository not found: 404 Client Error...",
-            "source_uri": "huggingface://nonexistent/repo",
-            "status_code": 404,
-        }
+        result = await _pull_on_host(parsed, uri, mock_host)
+        assert isinstance(result, _StructuredPullError)
+        assert result.status_code == 404
+        assert result.error == "not_found"
+        assert result.detail == "HuggingFace repository not found: 404 Client Error..."
+        assert result.source_uri == "huggingface://nonexistent/repo"

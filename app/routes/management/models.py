@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
 
+# Error codes that should be propagated instead of wrapped in 502
+PROPAGATED_CODES = {404, 507}
+
+# Structured error format returned by hosts for Phase 1 features
+# {"error": str, "detail": str, "source_uri": str, "status_code": int}
+
+# Error constants for distribution failures
+ERR_NOT_IMPLEMENTED = "not_implemented"
+ERR_NOT_FOUND = "not_found"
+
 
 class DistributeRequest(BaseModel):
     """Request to distribute a model to a target host."""
@@ -105,30 +115,47 @@ async def _check_disk_space(host: Host) -> float | None:
     return None
 
 
-async def _pull_on_host(parsed: Any, source_uri: str, host: Host) -> tuple[str, bool]:
+class _StructuredPullError:
+    """Internal container for structured pull failures (not raised, returned in result)."""
+
+    def __init__(self, error: str, detail: str, source_uri: str, status_code: int):
+        self.error = error
+        self.detail = detail
+        self.source_uri = source_uri
+        self.status_code = status_code
+
+
+async def _pull_on_host(
+    parsed: Any, source_uri: str, host: Host
+) -> tuple[str, bool] | _StructuredPullError:
     """
     Tells the target host to pull the model.
-    Returns (local_path, cached_bool).
+    Returns (local_path, cached_bool) on success, or a _StructuredPullError on failure.
+
+    Raises HTTPException only for connection-level errors (502).
+    Returns _StructuredPullError for expected failures (400, 404, 501, 507).
     """
     if isinstance(parsed, LocalURI):
-        raise HTTPException(
+        return _StructuredPullError(
+            error="validation_error",
+            detail="Cannot distribute local:// URIs",
+            source_uri=source_uri,
             status_code=400,
-            detail=f"Cannot distribute local:// URIs: {source_uri}",
         )
     if isinstance(parsed, RepoURI):
-        # Spec says repo:// is handled by Data Repository which is Phase 1
-        raise HTTPException(
+        return _StructuredPullError(
+            error=ERR_NOT_IMPLEMENTED,
+            detail="repo:// distribution requires Data Repository integration (Phase 1)",
+            source_uri=source_uri,
             status_code=501,
-            detail=(
-                f"repo:// distribution requires Data Repository integration (Phase 1). "
-                f"URI: {source_uri}"
-            ),
         )
 
     if not isinstance(parsed, HuggingFaceURI):
-        raise HTTPException(
-            status_code=400,
+        return _StructuredPullError(
+            error="validation_error",
             detail=f"Unsupported URI type for distribution: {type(parsed).__name__}",
+            source_uri=source_uri,
+            status_code=400,
         )
 
     url = f"{host.url.rstrip('/')}/models/pull"
@@ -153,39 +180,39 @@ async def _pull_on_host(parsed: Any, source_uri: str, host: Host) -> tuple[str, 
                     path = data.get("path")
                     cached = data.get("cached", False)
                     if not path:
-                        raise HTTPException(
+                        return _StructuredPullError(
+                            error="bad_response",
+                            detail=f"Host '{host.name}' ({host.url}) returned success but no path",
+                            source_uri=source_uri,
                             status_code=502,
-                            detail=f"Host '{host.name}' ({host.url}) returned success but no path for model pull.",
                         )
                     return path, cached
 
-                # Propagate specific error codes with structured format, wrap others in 502
-                PROPAGATED_CODES = {404, 507}
+                # Parse structured error from host
                 try:
                     err = await response.json()
-                    # Host returns structured error: {"error", "detail", "source_uri", "status_code"}
                     if err.get("error") and err.get("status_code"):
-                        # Preserve structured error format for propagation
-                        out_code = err.get("status_code", response.status)
-                        if out_code in PROPAGATED_CODES:
-                            raise HTTPException(status_code=out_code, detail=err)
+                        return _StructuredPullError(
+                            error=err["error"],
+                            detail=err.get("detail", await response.text()),
+                            source_uri=err.get("source_uri", source_uri),
+                            status_code=err.get("status_code", response.status),
+                        )
                     detail = (
                         err.get("detail") or err.get("error") or await response.text()
                     )
-                except HTTPException:
-                    raise
                 except Exception:
                     detail = await response.text()
 
                 out_code = (
                     response.status if response.status in PROPAGATED_CODES else 502
                 )
-                raise HTTPException(
-                    status_code=out_code,
+                return _StructuredPullError(
+                    error="pull_failed",
                     detail=f"Model pull failed on host '{host.name}' [{response.status}]: {detail}",
+                    source_uri=source_uri,
+                    status_code=out_code,
                 )
-    except HTTPException:
-        raise
     except (
         aiohttp.ClientConnectionError,
         aiohttp.ClientConnectorError,
@@ -195,13 +222,13 @@ async def _pull_on_host(parsed: Any, source_uri: str, host: Host) -> tuple[str, 
             status_code=502,
             detail=f"Host '{host.name}' ({host.url}) is unreachable during model pull: {e}",
         )
-    except Exception as e:
+    except Exception:
         logger.exception(
             "Unexpected error during model distribution to host %s", host.id
         )
         raise HTTPException(
             status_code=502,
-            detail=f"Unexpected error during model distribution to host '{host.name}': {e}",
+            detail=f"Unexpected error during model distribution to host '{host.name}':",
         )
 
 
@@ -235,6 +262,10 @@ async def _fetch_host_models(host: Host) -> list[dict]:
 async def distribute_model(req: DistributeRequest) -> list[DistributeResult]:
     """
     Distribute one or more models to a target host.
+
+    When distributing an array, each model is processed individually.
+    Successful results are returned; failures are logged and skipped so
+    partial results are returned for items that succeeded.
     """
     uris = [req.source_uri] if isinstance(req.source_uri, str) else req.source_uri
     host = await host_db.get_host(req.target_host_id)
@@ -252,10 +283,25 @@ async def distribute_model(req: DistributeRequest) -> list[DistributeResult]:
             detail=f"Insufficient disk on target host '{host.name}': {available:.2f} GB available",
         )
 
-    results = []
+    results: list[DistributeResult] = []
     for uri in uris:
-        parsed = parse(uri)  # Raises 400 on bad URI
-        path, cached = await _pull_on_host(parsed, uri, host)
+        try:
+            parsed = parse(uri)  # Raises 400 on bad URI
+        except HTTPException:
+            raise
+
+        pull_result = await _pull_on_host(parsed, uri, host)
+        if isinstance(pull_result, _StructuredPullError):
+            logger.warning(
+                "Model pull failed on host '%s' [%d]: %s [%s]",
+                host.name,
+                pull_result.status_code,
+                pull_result.detail,
+                pull_result.source_uri,
+            )
+            # Skip this item and continue to next — partial results are returned
+            continue
+        path, cached = pull_result
         results.append(
             DistributeResult(
                 source_uri=uri,
