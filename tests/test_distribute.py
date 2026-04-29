@@ -219,3 +219,33 @@ async def test_distribute_model_disk_check_failure_proceeds(mock_host):
         results = await distribute_model(req)
         assert len(results) == 1
         assert results[0].path == "/path"
+
+
+@pytest.mark.anyio
+async def test_pull_on_host_404_structured_error(mock_host):
+    """Test that 404 errors from host are propagated with structured format (B-008)."""
+    uri = "huggingface://nonexistent/repo"
+    parsed = parse(uri)
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_resp = AsyncMock()
+        mock_resp.status = 404
+        # Host returns structured error format
+        mock_resp.json.return_value = {
+            "error": "not_found",
+            "detail": "HuggingFace repository not found: 404 Client Error...",
+            "source_uri": "huggingface://nonexistent/repo",
+            "status_code": 404,
+        }
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await _pull_on_host(parsed, uri, mock_host)
+        assert exc.value.status_code == 404
+        # The HTTPException should have the structured error as detail
+        assert exc.value.detail == {
+            "error": "not_found",
+            "detail": "HuggingFace repository not found: 404 Client Error...",
+            "source_uri": "huggingface://nonexistent/repo",
+            "status_code": 404,
+        }

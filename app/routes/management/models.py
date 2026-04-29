@@ -159,13 +159,21 @@ async def _pull_on_host(parsed: Any, source_uri: str, host: Host) -> tuple[str, 
                         )
                     return path, cached
 
-                # Propagate specific error codes, wrap others in 502
+                # Propagate specific error codes with structured format, wrap others in 502
                 PROPAGATED_CODES = {404, 507}
                 try:
                     err = await response.json()
+                    # Host returns structured error: {"error", "detail", "source_uri", "status_code"}
+                    if err.get("error") and err.get("status_code"):
+                        # Preserve structured error format for propagation
+                        out_code = err.get("status_code", response.status)
+                        if out_code in PROPAGATED_CODES:
+                            raise HTTPException(status_code=out_code, detail=err)
                     detail = (
                         err.get("detail") or err.get("error") or await response.text()
                     )
+                except HTTPException:
+                    raise
                 except Exception:
                     detail = await response.text()
 
