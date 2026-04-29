@@ -97,7 +97,10 @@ async def test_resolve_huggingface_404():
             await resolve(uri, host_url, "key")
 
         assert exc.value.status_code == 404
-        assert f"Model pull failed on host '{host_url}' [404]: Not Found" in exc.value.detail
+        assert (
+            f"Model pull failed on host '{host_url}' [404]: Not Found"
+            in exc.value.detail
+        )
 
 
 @pytest.mark.anyio
