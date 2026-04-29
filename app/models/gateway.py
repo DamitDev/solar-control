@@ -3,7 +3,7 @@
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RegistryEntry(BaseModel):
@@ -12,6 +12,8 @@ class RegistryEntry(BaseModel):
     Each entry represents one running model instance on one host,
     carrying everything the gateway needs to route a request to it.
     """
+
+    model_config = ConfigDict(protected_namespaces=())
 
     host_id: str
     instance_id: str
