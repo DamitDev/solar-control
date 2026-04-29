@@ -193,5 +193,49 @@ async def test_resolve_repo_stub():
     with pytest.raises(HTTPException) as exc:
         await resolve(uri, "http://host:8000", "key")
 
-    assert exc.value.status_code == 502
-    assert "repo:// resolver not yet available" in exc.value.detail
+    assert exc.value.status_code == 501
+    assert (
+        "repo:// resolver not yet available. Data Repository integration will be completed in Phase 1."
+        in exc.value.detail
+    )
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_stub_includes_uri():
+    uri = "repo://my-model:v1.2.3"
+    with pytest.raises(HTTPException) as exc:
+        await resolve(uri, "http://host:8000", "key")
+
+    assert exc.value.status_code == 501
+    assert f"URI: {uri}" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_invalid_missing_version():
+    # Dispatcher calls parse first, which raises 400
+    uri = "repo://iris-osl"
+    with pytest.raises(HTTPException) as exc:
+        await resolve(uri, "http://host:8000", "key")
+
+    assert exc.value.status_code == 400
+    assert "Missing version" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_invalid_empty_name():
+    uri = "repo://:v3"
+    with pytest.raises(HTTPException) as exc:
+        await resolve(uri, "http://host:8000", "key")
+
+    assert exc.value.status_code == 400
+    assert "Name and version must be non-empty" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_invalid_empty_version():
+    uri = "repo://iris-osl:"
+    with pytest.raises(HTTPException) as exc:
+        await resolve(uri, "http://host:8000", "key")
+
+    assert exc.value.status_code == 400
+    assert "Name and version must be non-empty" in exc.value.detail
