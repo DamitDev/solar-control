@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.models import Host, HostCreate, HostResponse, HostStatus
 from app.database.hosts import host_db
+from app.model_resolvers import resolve
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
 
@@ -271,6 +272,13 @@ async def restart_instance(host_id: str, instance_id: str):
 @router.post("/{host_id}/instances")
 async def create_instance(host_id: str, instance_data: dict[str, Any]):
     host = _require_host(await host_db.get_host(host_id))
+
+    # Resolve model_source if present
+    model_source = instance_data.get("model_source")
+    if model_source:
+        resolved = await resolve(model_source, host.url, host.api_key)
+        instance_data = {**instance_data, "model_source": resolved}
+
     try:
         async with aiohttp.ClientSession() as session:
             url = f"{host.url}/instances"
