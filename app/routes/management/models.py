@@ -34,6 +34,59 @@ class DistributeResult(BaseModel):
     cached: bool
 
 
+class HostModelInfo(BaseModel):
+    """Info about a model on a specific host."""
+
+    host_id: str
+    host_name: str
+    size_bytes: int
+    path: str
+
+
+class ModelAvailabilityResponse(BaseModel):
+    """Aggregate view of model availability across hosts."""
+
+    models: dict[str, list[HostModelInfo]]
+
+
+@router.get("/availability", response_model=ModelAvailabilityResponse)
+async def get_model_availability(
+    model_name: str | None = None,
+) -> ModelAvailabilityResponse:
+    """
+    Returns an aggregated view of model availability across all hosts.
+    Optional model_name filter returns only hosts that have that specific model.
+    """
+    hosts = await host_db.get_all_hosts()
+    results = await asyncio.gather(*[_fetch_host_models(h) for h in hosts])
+
+    # model_name -> list[HostModelInfo]
+    availability: dict[str, list[HostModelInfo]] = {}
+
+    for host, host_models in zip(hosts, results):
+        for m in host_models:
+            name = m.get("name")
+            if not name:
+                continue
+
+            if model_name and name != model_name:
+                continue
+
+            if name not in availability:
+                availability[name] = []
+
+            availability[name].append(
+                HostModelInfo(
+                    host_id=host.id,
+                    host_name=host.name,
+                    size_bytes=m.get("size_bytes", 0),
+                    path=m.get("path", ""),
+                )
+            )
+
+    return ModelAvailabilityResponse(models=availability)
+
+
 async def _check_disk_space(host: Host) -> float | None:
     """
     Best-effort check of available disk space on the target host.
@@ -142,6 +195,32 @@ async def _pull_on_host(parsed: Any, source_uri: str, host: Host) -> tuple[str, 
             status_code=502,
             detail=f"Unexpected error during model distribution to host '{host.name}': {e}",
         )
+
+
+async def _fetch_host_models(host: Host) -> list[dict]:
+    """
+    Fetches the list of models from a single host.
+    Returns a list of dicts with {name, size_bytes, path}, or [] on any error.
+    """
+    url = f"{host.url.rstrip('/')}/models"
+    headers = {"X-API-Key": host.api_key}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                else:
+                    logger.warning(
+                        "Host %s (%s) returned %d for GET /models",
+                        host.id,
+                        host.url,
+                        resp.status,
+                    )
+    except Exception as e:
+        logger.warning("Failed to fetch models from host %s: %s", host.id, e)
+    return []
 
 
 @router.post("/distribute", response_model=list[DistributeResult])
