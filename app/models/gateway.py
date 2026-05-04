@@ -22,12 +22,28 @@ class RegistryEntry(BaseModel):
     model_alias: str
     supported_endpoints: list[str] = Field(default_factory=list)
     backend_type: str = "llamacpp"
+    context_size: int | None = None
 
     DEFAULT_ENDPOINTS: ClassVar[list[str]] = [
         "/v1/chat/completions",
         "/v1/completions",
         "/v1/models",
     ]
+
+    @staticmethod
+    def _extract_context_size(instance: dict[str, Any]) -> int | None:
+        """Extract runtime context size from host instance payloads."""
+        config = instance.get("config") or {}
+        for source in (instance, config):
+            for key in ("ctx_size", "context_size", "n_ctx"):
+                value = source.get(key)
+                if isinstance(value, int) and value > 0:
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    parsed = int(value)
+                    if parsed > 0:
+                        return parsed
+        return None
 
     @classmethod
     def from_ws_instance(
@@ -58,6 +74,7 @@ class RegistryEntry(BaseModel):
                 "supported_endpoints", cls.DEFAULT_ENDPOINTS
             ),
             backend_type=instance.get("backend_type", "llamacpp"),
+            context_size=cls._extract_context_size(instance),
         )
 
     @classmethod
@@ -88,4 +105,5 @@ class RegistryEntry(BaseModel):
                 "supported_endpoints", cls.DEFAULT_ENDPOINTS
             ),
             backend_type=config.get("backend_type", "llamacpp"),
+            context_size=cls._extract_context_size(instance),
         )

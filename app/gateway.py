@@ -76,23 +76,25 @@ class OpenAIGateway:
         cached: list[dict[str, Any]] = []
         for instance in instances:
             config = instance.get("config") or {}
-            cached.append(
-                {
-                    "id": instance.get("id"),
-                    "alias": config.get("alias", instance.get("alias", "unknown")),
-                    "status": instance.get("status"),
-                    "port": instance.get("port"),
-                    "supported_endpoints": instance.get(
-                        "supported_endpoints",
-                        RegistryEntry.DEFAULT_ENDPOINTS,
-                    ),
-                    "backend_type": config.get(
-                        "backend_type",
-                        instance.get("backend_type", "llamacpp"),
-                    ),
-                    "api_key": config.get("api_key"),
-                }
-            )
+            context_size = RegistryEntry._extract_context_size(instance)
+            item = {
+                "id": instance.get("id"),
+                "alias": config.get("alias", instance.get("alias", "unknown")),
+                "status": instance.get("status"),
+                "port": instance.get("port"),
+                "supported_endpoints": instance.get(
+                    "supported_endpoints",
+                    RegistryEntry.DEFAULT_ENDPOINTS,
+                ),
+                "backend_type": config.get(
+                    "backend_type",
+                    instance.get("backend_type", "llamacpp"),
+                ),
+                "api_key": config.get("api_key"),
+            }
+            if context_size is not None:
+                item["ctx_size"] = context_size
+            cached.append(item)
         return cached
 
     async def refresh_model_registry(self) -> None:
@@ -432,6 +434,51 @@ class OpenAIGateway:
         except Exception:
             return {}
 
+    async def _fetch_instance_context_size(self, instance: RegistryEntry) -> int | None:
+        """Fetch ctx_size from solar-host when the cached registry entry lacks it."""
+        if instance.backend_type != "llamacpp":
+            return None
+        try:
+            await self._ensure_session()
+            if not self.session:
+                return None
+            host = await host_db.get_host(instance.host_id)
+            if not host:
+                return None
+            url = f"{host.url}/instances/{instance.instance_id}"
+            headers = {"X-API-Key": host.api_key}
+            timeout = aiohttp.ClientTimeout(total=3)
+            async with self.session.get(url, headers=headers, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return RegistryEntry._extract_context_size(data)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _override_context_metadata(
+        model: dict[str, Any], context_size: int | None
+    ) -> dict[str, Any]:
+        if not context_size:
+            return model
+
+        updated = dict(model)
+        meta = dict(updated.get("meta") or {})
+        if meta:
+            meta["n_ctx_train"] = context_size
+            meta["ctx_size"] = context_size
+            updated["meta"] = meta
+
+        details = updated.get("details")
+        if isinstance(details, dict):
+            updated["details"] = {
+                **details,
+                "context_length": context_size,
+            }
+
+        return updated
+
     async def get_available_models(self) -> dict[str, list[dict[str, Any]]]:
         """Aggregate /v1/models from all registered upstream instances.
 
@@ -455,6 +502,9 @@ class OpenAIGateway:
             if not instances:
                 continue
             instance = instances[0]
+            context_size = instance.context_size
+            if context_size is None:
+                context_size = await self._fetch_instance_context_size(instance)
             try:
                 url = f"{instance.url}/v1/models"
                 headers = {"Authorization": f"Bearer {instance.api_key}"}
@@ -471,7 +521,9 @@ class OpenAIGateway:
                                 continue
                             name = m.get("name") or m.get("model")
                             if name and name not in ollama_dict:
-                                ollama_dict[name] = m
+                                ollama_dict[name] = self._override_context_metadata(
+                                    m, context_size
+                                )
                             caps = m.get("capabilities")
                             if name and isinstance(caps, list):
                                 caps_by_name[name] = caps
@@ -486,6 +538,7 @@ class OpenAIGateway:
                                     **model,
                                     "capabilities": caps_by_name[model_id],
                                 }
+                            model = self._override_context_metadata(model, context_size)
                             if model_id not in data_dict:
                                 data_dict[model_id] = model
             except Exception:
@@ -499,6 +552,9 @@ class OpenAIGateway:
                         "owned_by": "solar",
                         "capabilities": fallback_caps,
                     }
+                    data_dict[alias] = self._override_context_metadata(
+                        data_dict[alias], context_size
+                    )
                     if alias not in ollama_dict:
                         ollama_dict[alias] = {
                             "name": alias,
@@ -520,6 +576,9 @@ class OpenAIGateway:
                                 "quantization_level": "",
                             },
                         }
+                        ollama_dict[alias] = self._override_context_metadata(
+                            ollama_dict[alias], context_size
+                        )
 
         return {
             "models": list(ollama_dict.values()),
