@@ -185,6 +185,7 @@ async def test_pull_on_host_repo_uri_resolve_5xx_raises(mock_host):
 
         assert exc.value.status_code == 502
         assert "Data Repository resolution failed [500]" in exc.value.detail
+        assert "internal error" in exc.value.detail
 
 
 @pytest.mark.anyio
