@@ -12,8 +12,8 @@ from app.database.hosts import host_db
 from app.models import Host
 from app.model_resolvers.parser import parse, HuggingFaceURI, RepoURI, LocalURI
 from app.model_resolvers.repo import (
-    _resolve_from_data_repository,
-    _validate_resolved_model,
+    resolve_from_data_repository,
+    validate_resolved_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -136,8 +136,8 @@ async def _pull_on_host(
     Tells the target host to pull the model.
     Returns (local_path, cached_bool) on success, or a _StructuredPullError on failure.
 
-    Raises HTTPException only for connection-level errors (502).
-    Returns _StructuredPullError for expected failures (400, 404, 501, 507).
+    Raises HTTPException for connection-level/dependency failures (5xx).
+    Returns _StructuredPullError for expected request/content failures (4xx, 507).
     """
     if isinstance(parsed, LocalURI):
         return _StructuredPullError(
@@ -148,9 +148,11 @@ async def _pull_on_host(
         )
     if isinstance(parsed, RepoURI):
         try:
-            resolved = await _resolve_from_data_repository(source_uri)
-            _validate_resolved_model(resolved, source_uri)
+            resolved = await resolve_from_data_repository(source_uri)
+            validate_resolved_model(resolved, source_uri)
         except HTTPException as exc:
+            if exc.status_code >= 500:
+                raise
             return _StructuredPullError(
                 error="resolve_failed",
                 detail=exc.detail,

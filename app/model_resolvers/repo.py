@@ -5,10 +5,15 @@ import aiohttp
 from fastapi import HTTPException
 
 from app.config import settings
-from .parser import RepoURI
 
 
-async def _resolve_from_data_repository(source_uri: str) -> dict[str, Any]:
+def _to_local_uri(path: str) -> str:
+    if path.startswith("/"):
+        return f"local:///{path.lstrip('/')}"
+    return f"local://{path}"
+
+
+async def resolve_from_data_repository(source_uri: str) -> dict[str, Any]:
     if not settings.data_repository_url:
         raise HTTPException(
             status_code=500,
@@ -68,7 +73,7 @@ async def _resolve_from_data_repository(source_uri: str) -> dict[str, Any]:
         )
 
 
-def _validate_resolved_model(payload: dict[str, Any], source_uri: str) -> None:
+def validate_resolved_model(payload: dict[str, Any], source_uri: str) -> None:
     category = payload.get("category")
     if category != "model":
         raise HTTPException(
@@ -134,7 +139,7 @@ async def _pull_from_host(
                                 f"for model pull."
                             ),
                         )
-                    return f"local://{path}"
+                    return _to_local_uri(path)
 
                 try:
                     err = await response.json()
@@ -168,21 +173,15 @@ async def _pull_from_host(
         )
 
 
-async def resolve_repo(
-    uri: RepoURI, source_uri: str, host_url: str, host_api_key: str
-) -> str:
+async def resolve_repo(source_uri: str, host_url: str, host_api_key: str) -> str:
     """
-    Stub for repo:// resolver.
-
-    Expected behavior in Phase 1 (D-016):
-    1. Call Data Repository GET /api/resolve?uri={source_uri} to obtain a harbor_ref.
-    2. Pull the OCI artifact from Harbor using ORAS (harbor-oci-client) into the
-       host's managed models directory.
-    3. Return the resolved local:// path.
+    Resolves a repo:// URI by querying Data Repository metadata and
+    asking the target host to pull the resolved Harbor artifact.
+    Returns the resolved local:// path.
     """
     # Fetch authoritative metadata from Data Repository
-    resolved = await _resolve_from_data_repository(source_uri)
-    _validate_resolved_model(resolved, source_uri)
+    resolved = await resolve_from_data_repository(source_uri)
+    validate_resolved_model(resolved, source_uri)
 
     return await _pull_from_host(
         harbor_ref=resolved["harbor_ref"],
@@ -192,3 +191,8 @@ async def resolve_repo(
         host_url=host_url,
         host_api_key=host_api_key,
     )
+
+
+# Backward-compatible aliases for existing internal imports.
+_resolve_from_data_repository = resolve_from_data_repository
+_validate_resolved_model = validate_resolved_model

@@ -164,6 +164,30 @@ async def test_pull_on_host_repo_uri(mock_host):
 
 
 @pytest.mark.anyio
+async def test_pull_on_host_repo_uri_resolve_5xx_raises(mock_host):
+    uri = "repo://model:v1"
+    parsed = parse(uri)
+    with (
+        patch("app.model_resolvers.repo.settings") as mock_settings,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
+        mock_settings.data_repository_url = "http://data-repo:8000"
+        mock_settings.data_repository_api_key = ""
+        mock_settings.data_repository_timeout_s = 10.0
+
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 500
+        resolve_resp.json.return_value = {"detail": "internal error"}
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await _pull_on_host(parsed, uri, mock_host)
+
+        assert exc.value.status_code == 502
+        assert "Data Repository resolution failed [500]" in exc.value.detail
+
+
+@pytest.mark.anyio
 async def test_distribute_model_route_success(mock_host):
     req = DistributeRequest(target_host_id="host-1", source_uri="huggingface://phi-3")
 

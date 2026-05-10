@@ -18,7 +18,7 @@ async def resolve(uri_str: str, host_url: str, host_api_key: str) -> str:
         return await resolve_huggingface(parsed, uri_str, host_url, host_api_key)
 
     elif isinstance(parsed, RepoURI):
-        return await resolve_repo(parsed, uri_str, host_url, host_api_key)
+        return await resolve_repo(uri_str, host_url, host_api_key)
 
     else:
         # Should not happen if parser is correct
