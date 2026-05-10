@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://solar:solar@localhost:5432/solar_gateway"
     redis_url: str = "redis://localhost:6379/0"
 
+    data_repository_url: str = ""
+    data_repository_api_key: str = ""
+    data_repository_timeout_s: float = 10.0
+
     db_pool_size: int = 20
     db_max_overflow: int = 10
 

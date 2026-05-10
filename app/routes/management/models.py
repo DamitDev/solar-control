@@ -11,6 +11,10 @@ from pydantic import BaseModel
 from app.database.hosts import host_db
 from app.models import Host
 from app.model_resolvers.parser import parse, HuggingFaceURI, RepoURI, LocalURI
+from app.model_resolvers.repo import (
+    _resolve_from_data_repository,
+    _validate_resolved_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,12 +147,108 @@ async def _pull_on_host(
             status_code=400,
         )
     if isinstance(parsed, RepoURI):
-        return _StructuredPullError(
-            error=ERR_NOT_IMPLEMENTED,
-            detail="repo:// distribution requires Data Repository integration (Phase 1)",
-            source_uri=source_uri,
-            status_code=501,
-        )
+        try:
+            resolved = await _resolve_from_data_repository(source_uri)
+            _validate_resolved_model(resolved, source_uri)
+        except HTTPException as exc:
+            return _StructuredPullError(
+                error="resolve_failed",
+                detail=exc.detail,
+                source_uri=source_uri,
+                status_code=exc.status_code,
+            )
+
+        url = f"{host.url.rstrip('/')}/models/pull"
+        headers = {"X-API-Key": host.api_key, "Content-Type": "application/json"}
+        payload = {
+            "source": "harbor",
+            "harbor_ref": resolved["harbor_ref"],
+            "source_uri": source_uri,
+            "category": resolved.get("category"),
+            "name": resolved.get("name"),
+            "version": resolved.get("version"),
+            "size_bytes": resolved.get("size_bytes"),
+            "checksum": resolved.get("checksum"),
+            "metadata": resolved.get("metadata"),
+        }
+        checksum = resolved.get("checksum")
+        if checksum:
+            payload["digest"] = checksum
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        path = data.get("path")
+                        cached = data.get("cached", False)
+                        if not path:
+                            return _StructuredPullError(
+                                error="bad_response",
+                                detail=(
+                                    f"Host '{host.name}' ({host.url}) returned success "
+                                    f"but no path"
+                                ),
+                                source_uri=source_uri,
+                                status_code=502,
+                            )
+                        return path, cached
+
+                    try:
+                        err = await response.json()
+                        if err.get("error") and err.get("status_code"):
+                            return _StructuredPullError(
+                                error=err["error"],
+                                detail=err.get("detail", await response.text()),
+                                source_uri=err.get("source_uri", source_uri),
+                                status_code=err.get("status_code", response.status),
+                            )
+                        detail = (
+                            err.get("detail")
+                            or err.get("error")
+                            or await response.text()
+                        )
+                    except Exception:
+                        detail = await response.text()
+
+                    out_code = (
+                        response.status if response.status in PROPAGATED_CODES else 502
+                    )
+                    return _StructuredPullError(
+                        error="pull_failed",
+                        detail=(
+                            f"Model pull failed on host '{host.name}' "
+                            f"[{response.status}]: {detail}"
+                        ),
+                        source_uri=source_uri,
+                        status_code=out_code,
+                    )
+        except (
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientConnectorError,
+            asyncio.TimeoutError,
+        ) as e:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Host '{host.name}' ({host.url}) is unreachable during model pull: {e}"
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Unexpected error during model distribution to host %s", host.id
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Unexpected error during model distribution to host '{host.name}':"
+                ),
+            )
 
     if not isinstance(parsed, HuggingFaceURI):
         return _StructuredPullError(

@@ -131,13 +131,36 @@ async def test_pull_on_host_local_uri(mock_host):
 async def test_pull_on_host_repo_uri(mock_host):
     uri = "repo://model:v1"
     parsed = parse(uri)
+    with (
+        patch("app.model_resolvers.repo.settings") as mock_settings,
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        mock_settings.data_repository_url = "http://data-repo:8000"
+        mock_settings.data_repository_api_key = ""
+        mock_settings.data_repository_timeout_s = 10.0
 
-    result = await _pull_on_host(parsed, uri, mock_host)
-    assert isinstance(result, _StructuredPullError)
-    assert result.status_code == 501
-    assert "repo:// distribution requires Data Repository" in result.detail
-    assert result.source_uri == "repo://model:v1"
-    assert result.error == "not_implemented"
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = {
+            "category": "model",
+            "name": "model",
+            "version": "v1",
+            "harbor_ref": "imgrepo.damit.hu/supernova/model:v1",
+            "size_bytes": 123,
+            "checksum": "sha256:abc",
+            "metadata": {},
+            "created_at": "2026-04-29T10:00:00Z",
+        }
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        pull_resp = AsyncMock()
+        pull_resp.status = 200
+        pull_resp.json.return_value = {"path": "/models/repo--model--v1"}
+        mock_post.return_value.__aenter__.return_value = pull_resp
+
+        result = await _pull_on_host(parsed, uri, mock_host)
+        assert result == ("/models/repo--model--v1", False)
 
 
 @pytest.mark.anyio
@@ -203,10 +226,10 @@ async def test_distribute_model_partial_results(mock_host):
         mock_pull.side_effect = [
             ("/path1", False),
             _StructuredPullError(
-                error="not_implemented",
-                detail="repo:// distribution requires Data Repository integration (Phase 1)",
+                error="resolve_failed",
+                detail="Data Repository is unreachable",
                 source_uri="repo://test-model:v1",
-                status_code=501,
+                status_code=502,
             ),
             ("/path3", True),
         ]
