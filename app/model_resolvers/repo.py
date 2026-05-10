@@ -191,8 +191,3 @@ async def resolve_repo(source_uri: str, host_url: str, host_api_key: str) -> str
         host_url=host_url,
         host_api_key=host_api_key,
     )
-
-
-# Backward-compatible aliases for existing internal imports.
-_resolve_from_data_repository = resolve_from_data_repository
-_validate_resolved_model = validate_resolved_model

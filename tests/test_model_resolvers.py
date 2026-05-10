@@ -218,7 +218,7 @@ async def test_resolve_repo_success():
         pull_resp = AsyncMock()
         pull_resp.status = 200
         pull_resp.json.return_value = {
-            "path": "//opt/solar/models/repo--iris-osl--v3",
+            "path": "/opt/solar/models/repo--iris-osl--v3",
             "cached": True,
         }
         mock_post.return_value.__aenter__.return_value = pull_resp
