@@ -142,7 +142,7 @@ class RepoResolver:
                                     f"for model pull."
                                 ),
                             )
-                        return self.to_local_uri(path)
+                        return RepoResolver.to_local_uri(path)
 
                     try:
                         err = await response.json()
