@@ -196,16 +196,16 @@ class RepoResolver:
         )
 
 
-_repo_resolver = RepoResolver()
+_default_resolver = RepoResolver()
 
 
 async def resolve_from_data_repository(source_uri: str) -> dict[str, Any]:
-    return await _repo_resolver.resolve_from_data_repository(source_uri)
+    return await _default_resolver.resolve_from_data_repository(source_uri)
 
 
 def validate_resolved_model(payload: dict[str, Any], source_uri: str) -> None:
-    _repo_resolver.validate_resolved_model(payload, source_uri)
+    _default_resolver.validate_resolved_model(payload, source_uri)
 
 
 async def resolve_repo(source_uri: str, host_url: str, host_api_key: str) -> str:
-    return await _repo_resolver.resolve_repo(source_uri, host_url, host_api_key)
+    return await _default_resolver.resolve_repo(source_uri, host_url, host_api_key)
