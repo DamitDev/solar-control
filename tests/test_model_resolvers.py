@@ -5,6 +5,22 @@ from app.model_resolvers.parser import parse, RepoURI, HuggingFaceURI, LocalURI
 from app.model_resolvers.dispatcher import resolve
 
 
+def _repo_resolve_payload(**overrides):
+    """Build a canonical Data Repository /api/resolve response."""
+    payload = {
+        "category": "model",
+        "name": "iris-osl",
+        "version": "v3",
+        "harbor_ref": "imgrepo.damit.hu/supernova/iris-osl:v3",
+        "size_bytes": 123,
+        "checksum": "sha256:abc",
+        "metadata": {},
+        "created_at": "2026-04-29T10:00:00Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_parser_local():
     # Absolute path
     p = parse("local:///opt/models/iris.gguf")
@@ -188,31 +204,17 @@ async def test_resolve_huggingface_structured_error():
 
 
 @pytest.mark.anyio
-async def test_resolve_repo_success():
+async def test_resolve_repo_success(repo_settings):
     uri = "repo://iris-osl:v3"
     host_url = "http://host:8000"
 
     with (
-        patch("app.model_resolvers.repo.settings") as mock_settings,
         patch("aiohttp.ClientSession.get") as mock_get,
         patch("aiohttp.ClientSession.post") as mock_post,
     ):
-        mock_settings.data_repository_url = "http://data-repo:8000"
-        mock_settings.data_repository_api_key = ""
-        mock_settings.data_repository_timeout_s = 10.0
-
         resolve_resp = AsyncMock()
         resolve_resp.status = 200
-        resolve_resp.json.return_value = {
-            "category": "model",
-            "name": "iris-osl",
-            "version": "v3",
-            "harbor_ref": "imgrepo.damit.hu/supernova/iris-osl:v3",
-            "size_bytes": 123,
-            "checksum": "sha256:abc",
-            "metadata": {},
-            "created_at": "2026-04-29T10:00:00Z",
-        }
+        resolve_resp.json.return_value = _repo_resolve_payload()
         mock_get.return_value.__aenter__.return_value = resolve_resp
 
         pull_resp = AsyncMock()
@@ -276,17 +278,10 @@ async def test_resolve_repo_invalid_empty_version():
 
 
 @pytest.mark.anyio
-async def test_resolve_repo_not_found():
+async def test_resolve_repo_not_found(repo_settings):
     uri = "repo://iris-osl:v99"
 
-    with (
-        patch("app.model_resolvers.repo.settings") as mock_settings,
-        patch("aiohttp.ClientSession.get") as mock_get,
-    ):
-        mock_settings.data_repository_url = "http://data-repo:8000"
-        mock_settings.data_repository_api_key = ""
-        mock_settings.data_repository_timeout_s = 10.0
-
+    with patch("aiohttp.ClientSession.get") as mock_get:
         resolve_resp = AsyncMock()
         resolve_resp.status = 404
         resolve_resp.json.return_value = {"detail": "Version not found"}
@@ -300,31 +295,17 @@ async def test_resolve_repo_not_found():
 
 
 @pytest.mark.anyio
-async def test_resolve_repo_pull_failed():
+async def test_resolve_repo_pull_failed(repo_settings):
     uri = "repo://iris-osl:v3"
     host_url = "http://host:8000"
 
     with (
-        patch("app.model_resolvers.repo.settings") as mock_settings,
         patch("aiohttp.ClientSession.get") as mock_get,
         patch("aiohttp.ClientSession.post") as mock_post,
     ):
-        mock_settings.data_repository_url = "http://data-repo:8000"
-        mock_settings.data_repository_api_key = ""
-        mock_settings.data_repository_timeout_s = 10.0
-
         resolve_resp = AsyncMock()
         resolve_resp.status = 200
-        resolve_resp.json.return_value = {
-            "category": "model",
-            "name": "iris-osl",
-            "version": "v3",
-            "harbor_ref": "imgrepo.damit.hu/supernova/iris-osl:v3",
-            "size_bytes": 123,
-            "checksum": "sha256:abc",
-            "metadata": {},
-            "created_at": "2026-04-29T10:00:00Z",
-        }
+        resolve_resp.json.return_value = _repo_resolve_payload()
         mock_get.return_value.__aenter__.return_value = resolve_resp
 
         pull_resp = AsyncMock()
@@ -344,17 +325,37 @@ async def test_resolve_repo_pull_failed():
 
 
 @pytest.mark.anyio
-async def test_resolve_repo_data_repo_unreachable():
+async def test_resolve_repo_pull_507_propagates(repo_settings):
+    """Insufficient-disk responses from the host propagate as 507, not 502."""
     uri = "repo://iris-osl:v3"
+    host_url = "http://host:8000"
 
     with (
-        patch("app.model_resolvers.repo.settings") as mock_settings,
         patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.post") as mock_post,
     ):
-        mock_settings.data_repository_url = "http://data-repo:8000"
-        mock_settings.data_repository_api_key = ""
-        mock_settings.data_repository_timeout_s = 10.0
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = _repo_resolve_payload()
+        mock_get.return_value.__aenter__.return_value = resolve_resp
 
+        pull_resp = AsyncMock()
+        pull_resp.status = 507
+        pull_resp.json.return_value = {"detail": "Insufficient disk space"}
+        mock_post.return_value.__aenter__.return_value = pull_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await resolve(uri, host_url, "key")
+
+        assert exc.value.status_code == 507
+        assert "Insufficient disk space" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_data_repo_unreachable(repo_settings):
+    uri = "repo://iris-osl:v3"
+
+    with patch("aiohttp.ClientSession.get") as mock_get:
         import aiohttp
 
         mock_get.side_effect = aiohttp.ClientConnectionError("Connection refused")
@@ -367,29 +368,30 @@ async def test_resolve_repo_data_repo_unreachable():
 
 
 @pytest.mark.anyio
-async def test_resolve_repo_rejects_dataset():
+async def test_resolve_repo_data_repo_url_unconfigured(repo_settings):
+    """An unset DATA_REPOSITORY_URL surfaces as 500, not a silent failure."""
+    repo_settings.data_repository_url = ""
+
+    with pytest.raises(HTTPException) as exc:
+        await resolve("repo://iris-osl:v3", "http://host:8000", "key")
+
+    assert exc.value.status_code == 500
+    assert "DATA_REPOSITORY_URL is not configured" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_rejects_dataset(repo_settings):
     uri = "repo://iris-tickets:2026-03"
 
-    with (
-        patch("app.model_resolvers.repo.settings") as mock_settings,
-        patch("aiohttp.ClientSession.get") as mock_get,
-    ):
-        mock_settings.data_repository_url = "http://data-repo:8000"
-        mock_settings.data_repository_api_key = ""
-        mock_settings.data_repository_timeout_s = 10.0
-
+    with patch("aiohttp.ClientSession.get") as mock_get:
         resolve_resp = AsyncMock()
         resolve_resp.status = 200
-        resolve_resp.json.return_value = {
-            "category": "dataset",
-            "name": "iris-tickets",
-            "version": "2026-03",
-            "harbor_ref": "imgrepo.damit.hu/supernova/iris-tickets:2026-03",
-            "size_bytes": 123,
-            "checksum": "sha256:abc",
-            "metadata": {},
-            "created_at": "2026-04-29T10:00:00Z",
-        }
+        resolve_resp.json.return_value = _repo_resolve_payload(
+            category="dataset",
+            name="iris-tickets",
+            version="2026-03",
+            harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:2026-03",
+        )
         mock_get.return_value.__aenter__.return_value = resolve_resp
 
         with pytest.raises(HTTPException) as exc:
@@ -397,3 +399,56 @@ async def test_resolve_repo_rejects_dataset():
 
         assert exc.value.status_code == 422
         assert "not a deployable model" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_missing_harbor_ref_is_422(repo_settings):
+    """Resolve responses without a harbor_ref are a per-item 422, not 502.
+
+    A 502 here would abort the whole /distribute batch because the route
+    re-raises 5xx. 422 keeps it as a structured per-item failure.
+    """
+    with patch("aiohttp.ClientSession.get") as mock_get:
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = _repo_resolve_payload(harbor_ref=None)
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await resolve("repo://iris-osl:v3", "http://host:8000", "key")
+
+        assert exc.value.status_code == 422
+        assert "missing harbor_ref" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_latest_forwarded_verbatim(repo_settings):
+    """``repo://name:latest`` must be passed through unchanged to Data Repository.
+
+    Per the issue: "do not invent separate latest behavior in Solar Control".
+    """
+    uri = "repo://iris-osl:latest"
+
+    with (
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        # Data Repository resolves "latest" -> a concrete version itself.
+        resolve_resp.json.return_value = _repo_resolve_payload(version="v7")
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        pull_resp = AsyncMock()
+        pull_resp.status = 200
+        pull_resp.json.return_value = {"path": "/opt/solar/models/repo--iris-osl--v7"}
+        mock_post.return_value.__aenter__.return_value = pull_resp
+
+        await resolve(uri, "http://host:8000", "key")
+
+        _, get_kwargs = mock_get.call_args
+        assert get_kwargs["params"] == {"uri": "repo://iris-osl:latest"}
+        # And the original source_uri is what the host sees, not a rewritten one.
+        _, post_kwargs = mock_post.call_args
+        assert post_kwargs["json"]["source_uri"] == "repo://iris-osl:latest"
+        assert post_kwargs["json"]["version"] == "v7"

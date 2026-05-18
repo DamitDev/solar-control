@@ -12,9 +12,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
-# Convert line endings for all .sh files to Unix format
-RUN find . -name "*.sh" -exec sed -i 's/\r$//' {} +
-
 RUN sed -i "s/^version = .*/version = \"${APP_VERSION}\"/" pyproject.toml && \
     pip install --no-cache-dir -e .
 

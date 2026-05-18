@@ -128,18 +128,13 @@ async def test_pull_on_host_local_uri(mock_host):
 
 
 @pytest.mark.anyio
-async def test_pull_on_host_repo_uri(mock_host):
+async def test_pull_on_host_repo_uri(mock_host, repo_settings):
     uri = "repo://model:v1"
     parsed = parse(uri)
     with (
-        patch("app.model_resolvers.repo.settings") as mock_settings,
         patch("aiohttp.ClientSession.get") as mock_get,
         patch("aiohttp.ClientSession.post") as mock_post,
     ):
-        mock_settings.data_repository_url = "http://data-repo:8000"
-        mock_settings.data_repository_api_key = ""
-        mock_settings.data_repository_timeout_s = 10.0
-
         resolve_resp = AsyncMock()
         resolve_resp.status = 200
         resolve_resp.json.return_value = {
@@ -164,17 +159,10 @@ async def test_pull_on_host_repo_uri(mock_host):
 
 
 @pytest.mark.anyio
-async def test_pull_on_host_repo_uri_resolve_5xx_raises(mock_host):
+async def test_pull_on_host_repo_uri_resolve_5xx_raises(mock_host, repo_settings):
     uri = "repo://model:v1"
     parsed = parse(uri)
-    with (
-        patch("app.model_resolvers.repo.settings") as mock_settings,
-        patch("aiohttp.ClientSession.get") as mock_get,
-    ):
-        mock_settings.data_repository_url = "http://data-repo:8000"
-        mock_settings.data_repository_api_key = ""
-        mock_settings.data_repository_timeout_s = 10.0
-
+    with patch("aiohttp.ClientSession.get") as mock_get:
         resolve_resp = AsyncMock()
         resolve_resp.status = 500
         resolve_resp.json.return_value = {"detail": "internal error"}
@@ -186,6 +174,36 @@ async def test_pull_on_host_repo_uri_resolve_5xx_raises(mock_host):
         assert exc.value.status_code == 502
         assert "Data Repository resolution failed [500]" in exc.value.detail
         assert "internal error" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_pull_on_host_repo_uri_missing_harbor_ref_is_partial(
+    mock_host, repo_settings
+):
+    """A Data Repository response missing harbor_ref must not abort the batch."""
+    uri = "repo://model:v1"
+    parsed = parse(uri)
+    with patch("aiohttp.ClientSession.get") as mock_get:
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = {
+            "category": "model",
+            "name": "model",
+            "version": "v1",
+            # harbor_ref intentionally omitted
+            "size_bytes": 123,
+            "checksum": "sha256:abc",
+            "metadata": {},
+        }
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        result = await _pull_on_host(parsed, uri, mock_host)
+
+        assert isinstance(result, _StructuredPullError)
+        assert result.status_code == 422
+        assert result.error == "resolve_failed"
+        assert "missing harbor_ref" in result.detail
+        assert result.source_uri == uri
 
 
 @pytest.mark.anyio

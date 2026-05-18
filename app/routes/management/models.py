@@ -12,6 +12,7 @@ from app.database.hosts import host_db
 from app.models import Host
 from app.model_resolvers.parser import parse, HuggingFaceURI, RepoURI, LocalURI
 from app.model_resolvers.repo import (
+    build_harbor_pull_payload,
     resolve_from_data_repository,
     validate_resolved_model,
 )
@@ -129,6 +130,99 @@ class _StructuredPullError:
         self.status_code = status_code
 
 
+# Long timeout: a full model pull on the host may take minutes.
+_HOST_PULL_TIMEOUT_S = 300
+
+
+async def _post_pull_to_host(
+    host: Host, source_uri: str, payload: dict
+) -> tuple[str, bool] | _StructuredPullError:
+    """POST a pre-built pull payload to ``host`` and translate the response.
+
+    Unlike ``app.model_resolvers.repo.post_harbor_pull`` (used by the
+    dispatcher path, which raises HTTPException for every failure), this
+    variant preserves structured per-item failures so the /distribute route
+    can keep producing partial-batch results. Transport-level failures still
+    raise HTTPException because they affect the whole batch, not one item.
+    """
+    url = f"{host.url.rstrip('/')}/models/pull"
+    headers = {"X-API-Key": host.api_key, "Content-Type": "application/json"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=_HOST_PULL_TIMEOUT_S),
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    path = data.get("path")
+                    cached = data.get("cached", False)
+                    if not path:
+                        return _StructuredPullError(
+                            error="bad_response",
+                            detail=(
+                                f"Host '{host.name}' ({host.url}) returned success "
+                                "but no path"
+                            ),
+                            source_uri=source_uri,
+                            status_code=502,
+                        )
+                    return path, cached
+
+                try:
+                    err = await response.json()
+                    if err.get("error") and err.get("status_code"):
+                        return _StructuredPullError(
+                            error=err["error"],
+                            detail=err.get("detail", await response.text()),
+                            source_uri=err.get("source_uri", source_uri),
+                            status_code=err.get("status_code", response.status),
+                        )
+                    detail = (
+                        err.get("detail") or err.get("error") or await response.text()
+                    )
+                except Exception:
+                    detail = await response.text()
+
+                out_code = (
+                    response.status if response.status in PROPAGATED_CODES else 502
+                )
+                return _StructuredPullError(
+                    error="pull_failed",
+                    detail=(
+                        f"Model pull failed on host '{host.name}' "
+                        f"[{response.status}]: {detail}"
+                    ),
+                    source_uri=source_uri,
+                    status_code=out_code,
+                )
+    except (
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientConnectorError,
+        asyncio.TimeoutError,
+    ) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Host '{host.name}' ({host.url}) is unreachable during model pull: {e}"
+            ),
+        )
+    except Exception as exc:
+        logger.exception(
+            "Unexpected error during model distribution to host %s", host.id
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Unexpected error during model distribution to host "
+                f"'{host.name}': {exc}"
+            ),
+        )
+
+
 async def _pull_on_host(
     parsed: Any, source_uri: str, host: Host
 ) -> tuple[str, bool] | _StructuredPullError:
@@ -160,97 +254,8 @@ async def _pull_on_host(
                 status_code=exc.status_code,
             )
 
-        url = f"{host.url.rstrip('/')}/models/pull"
-        headers = {"X-API-Key": host.api_key, "Content-Type": "application/json"}
-        payload = {
-            "source": "harbor",
-            "harbor_ref": resolved["harbor_ref"],
-            "source_uri": source_uri,
-            "category": resolved.get("category"),
-            "name": resolved.get("name"),
-            "version": resolved.get("version"),
-            "size_bytes": resolved.get("size_bytes"),
-            "checksum": resolved.get("checksum"),
-            "metadata": resolved.get("metadata"),
-        }
-        checksum = resolved.get("checksum")
-        if checksum:
-            payload["digest"] = checksum
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=300),
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        path = data.get("path")
-                        cached = data.get("cached", False)
-                        if not path:
-                            return _StructuredPullError(
-                                error="bad_response",
-                                detail=(
-                                    f"Host '{host.name}' ({host.url}) returned success "
-                                    f"but no path"
-                                ),
-                                source_uri=source_uri,
-                                status_code=502,
-                            )
-                        return path, cached
-
-                    try:
-                        err = await response.json()
-                        if err.get("error") and err.get("status_code"):
-                            return _StructuredPullError(
-                                error=err["error"],
-                                detail=err.get("detail", await response.text()),
-                                source_uri=err.get("source_uri", source_uri),
-                                status_code=err.get("status_code", response.status),
-                            )
-                        detail = (
-                            err.get("detail")
-                            or err.get("error")
-                            or await response.text()
-                        )
-                    except Exception:
-                        detail = await response.text()
-
-                    out_code = (
-                        response.status if response.status in PROPAGATED_CODES else 502
-                    )
-                    return _StructuredPullError(
-                        error="pull_failed",
-                        detail=(
-                            f"Model pull failed on host '{host.name}' "
-                            f"[{response.status}]: {detail}"
-                        ),
-                        source_uri=source_uri,
-                        status_code=out_code,
-                    )
-        except (
-            aiohttp.ClientConnectionError,
-            aiohttp.ClientConnectorError,
-            asyncio.TimeoutError,
-        ) as e:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"Host '{host.name}' ({host.url}) is unreachable during model pull: {e}"
-                ),
-            )
-        except Exception:
-            logger.exception(
-                "Unexpected error during model distribution to host %s", host.id
-            )
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"Unexpected error during model distribution to host '{host.name}':"
-                ),
-            )
+        payload = build_harbor_pull_payload(resolved, source_uri)
+        return await _post_pull_to_host(host, source_uri, payload)
 
     if not isinstance(parsed, HuggingFaceURI):
         return _StructuredPullError(
@@ -260,78 +265,12 @@ async def _pull_on_host(
             status_code=400,
         )
 
-    url = f"{host.url.rstrip('/')}/models/pull"
-    headers = {"X-API-Key": host.api_key, "Content-Type": "application/json"}
     payload = {
         "source": "huggingface",
         "model_id": parsed.model_id,
         "source_uri": source_uri,
     }
-
-    try:
-        # Long timeout for model pull as it might involve downloading GBs
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=300),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    path = data.get("path")
-                    cached = data.get("cached", False)
-                    if not path:
-                        return _StructuredPullError(
-                            error="bad_response",
-                            detail=f"Host '{host.name}' ({host.url}) returned success but no path",
-                            source_uri=source_uri,
-                            status_code=502,
-                        )
-                    return path, cached
-
-                # Parse structured error from host
-                try:
-                    err = await response.json()
-                    if err.get("error") and err.get("status_code"):
-                        return _StructuredPullError(
-                            error=err["error"],
-                            detail=err.get("detail", await response.text()),
-                            source_uri=err.get("source_uri", source_uri),
-                            status_code=err.get("status_code", response.status),
-                        )
-                    detail = (
-                        err.get("detail") or err.get("error") or await response.text()
-                    )
-                except Exception:
-                    detail = await response.text()
-
-                out_code = (
-                    response.status if response.status in PROPAGATED_CODES else 502
-                )
-                return _StructuredPullError(
-                    error="pull_failed",
-                    detail=f"Model pull failed on host '{host.name}' [{response.status}]: {detail}",
-                    source_uri=source_uri,
-                    status_code=out_code,
-                )
-    except (
-        aiohttp.ClientConnectionError,
-        aiohttp.ClientConnectorError,
-        asyncio.TimeoutError,
-    ) as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Host '{host.name}' ({host.url}) is unreachable during model pull: {e}",
-        )
-    except Exception:
-        logger.exception(
-            "Unexpected error during model distribution to host %s", host.id
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Unexpected error during model distribution to host '{host.name}':",
-        )
+    return await _post_pull_to_host(host, source_uri, payload)
 
 
 async def _fetch_host_models(host: Host) -> list[dict]:
