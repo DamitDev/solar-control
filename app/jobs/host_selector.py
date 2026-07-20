@@ -46,9 +46,7 @@ async def select_host(
     RuntimeError
         If no eligible host is found.
     """
-    threshold = (
-        min_disk_gb if min_disk_gb is not None else settings.job_min_disk_gb
-    )
+    threshold = min_disk_gb if min_disk_gb is not None else settings.job_min_disk_gb
 
     hosts = await host_db.get_all_hosts(role=role)
     logger.debug("select_host: found %d hosts with role=%s", len(hosts), role)
@@ -77,8 +75,7 @@ async def select_host(
             available,
         )
         raise RuntimeError(
-            f"No {role}-capable host available with "
-            f"≥{threshold} GB free disk space"
+            f"No {role}-capable host available with " f"≥{threshold} GB free disk space"
         )
 
     # Pick the host with the most available disk
@@ -89,8 +86,7 @@ async def select_host(
     selected = eligible[0]
 
     logger.info(
-        "Selected host '%s' (%s) for job — "
-        "disk_available_gb=%s, role=%s",
+        "Selected host '%s' (%s) for job — " "disk_available_gb=%s, role=%s",
         selected.name,
         selected.id,
         selected.disk_available_gb,
