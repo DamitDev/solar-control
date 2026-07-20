@@ -17,10 +17,7 @@ logger = logging.getLogger(__name__)
 class HostSelector(Protocol):
     """Protocol for pluggable host selection strategies."""
 
-    async def select(
-        self, hosts: list[Host], min_disk_gb: float
-    ) -> Host | None:
-        ...
+    async def select(self, hosts: list[Host], min_disk_gb: float) -> Host | None: ...
 
 
 class LeastLoadedSelector:
@@ -31,9 +28,7 @@ class LeastLoadedSelector:
     accuracy across replicas.
     """
 
-    async def select(
-        self, hosts: list[Host], min_disk_gb: float
-    ) -> Host | None:
+    async def select(self, hosts: list[Host], min_disk_gb: float) -> Host | None:
         if not hosts:
             return None
 
@@ -54,9 +49,7 @@ class RoundRobinSelector:
     tracking isn't available yet.
     """
 
-    async def select(
-        self, hosts: list[Host], min_disk_gb: float
-    ) -> Host | None:
+    async def select(self, hosts: list[Host], min_disk_gb: float) -> Host | None:
         if not hosts:
             return None
 
@@ -70,9 +63,7 @@ class MostDiskSelector:
     Best for large workspace creation where disk is the bottleneck.
     """
 
-    async def select(
-        self, hosts: list[Host], min_disk_gb: float
-    ) -> Host | None:
+    async def select(self, hosts: list[Host], min_disk_gb: float) -> Host | None:
         if not hosts:
             return None
 
@@ -127,15 +118,11 @@ async def select_host(
     RuntimeError
         If no eligible host is found.
     """
-    threshold = (
-        min_disk_gb if min_disk_gb is not None else settings.job_min_disk_gb
-    )
+    threshold = min_disk_gb if min_disk_gb is not None else settings.job_min_disk_gb
     sel = selector or _default_selector
 
     hosts = await host_db.get_all_hosts(role=role)
-    logger.debug(
-        "select_host: found %d hosts with role=%s", len(hosts), role
-    )
+    logger.debug("select_host: found %d hosts with role=%s", len(hosts), role)
 
     eligible = [
         h
@@ -155,15 +142,13 @@ async def select_host(
             for h in hosts
         ]
         logger.warning(
-            "No eligible host for role=%s, min_disk_gb=%s. "
-            "Available hosts: %s",
+            "No eligible host for role=%s, min_disk_gb=%s. " "Available hosts: %s",
             role,
             threshold,
             available,
         )
         raise RuntimeError(
-            f"No {role}-capable host available with "
-            f"≥{threshold} GB free disk space"
+            f"No {role}-capable host available with " f"≥{threshold} GB free disk space"
         )
 
     selected = await sel.select(eligible, threshold)
@@ -171,8 +156,7 @@ async def select_host(
         raise RuntimeError("Host selection strategy returned no host")
 
     logger.info(
-        "Selected host '%s' (%s) for job — "
-        "disk_available_gb=%s, role=%s",
+        "Selected host '%s' (%s) for job — " "disk_available_gb=%s, role=%s",
         selected.name,
         selected.id,
         selected.disk_available_gb,

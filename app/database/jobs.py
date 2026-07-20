@@ -77,9 +77,7 @@ class JobDB:
             )
             return [self._row_to_job(row) for row in result.scalars()]
 
-    async def get_all_jobs(
-        self, *, limit: int = 100, offset: int = 0
-    ) -> list[Job]:
+    async def get_all_jobs(self, *, limit: int = 100, offset: int = 0) -> list[Job]:
         """Get all jobs with pagination."""
         async with self._session() as session:
             result = await session.execute(
@@ -117,9 +115,7 @@ class JobDB:
             await session.commit()
             return True
 
-    async def update_job_host(
-        self, job_id: str, host_id: str
-    ) -> bool:
+    async def update_job_host(self, job_id: str, host_id: str) -> bool:
         """Update the host assigned to a job."""
         async with self._session() as session:
             await session.execute(
@@ -133,9 +129,7 @@ class JobDB:
     async def remove_job(self, job_id: str) -> bool:
         """Delete a job record."""
         async with self._session() as session:
-            await session.execute(
-                delete(JobRow).where(JobRow.id == job_id)
-            )
+            await session.execute(delete(JobRow).where(JobRow.id == job_id))
             await session.commit()
             return True
 

@@ -506,9 +506,7 @@ async def host_step_log(sid: str, data: dict[str, Any]):
         line=data.get("line", ""),
         level=data.get("level", "info"),
         correlation_id=data.get("correlation_id"),
-        timestamp=data.get(
-            "timestamp", datetime.now(timezone.utc).isoformat()
-        ),
+        timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
     )
     await sio.emit("job_log", payload.model_dump(), namespace="/webui")
 
@@ -536,9 +534,7 @@ async def host_step_log_batch(sid: str, data: dict[str, Any]):
             line=entry.get("line", ""),
             level=entry.get("level", "info"),
             correlation_id=entry.get("correlation_id"),
-            timestamp=entry.get(
-                "timestamp", datetime.now(timezone.utc).isoformat()
-            ),
+            timestamp=entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
         ).model_dump()
         for entry in entries
     ]
@@ -576,8 +572,6 @@ async def host_job_lifecycle(sid: str, data: dict[str, Any]):
         step_name=data.get("step_name"),
         correlation_id=data.get("correlation_id"),
         data=data.get("data", {}),
-        timestamp=data.get(
-            "timestamp", datetime.now(timezone.utc).isoformat()
-        ),
+        timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
     )
     await sio.emit("job_lifecycle", payload.model_dump(), namespace="/webui")

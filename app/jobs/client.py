@@ -57,9 +57,7 @@ class JobHostClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def submit_job(
-        self, host: Host, payload: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def submit_job(self, host: Host, payload: dict[str, Any]) -> dict[str, Any]:
         """Submit a job to ``POST {host.url}/jobs``.
 
         Returns the JSON response body on success.
@@ -89,9 +87,7 @@ class JobHostClient:
             url,
             json=payload,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(
-                total=settings.job_submission_timeout_s
-            ),
+            timeout=aiohttp.ClientTimeout(total=settings.job_submission_timeout_s),
         ) as response:
             body = await _read_body(response)
 
@@ -104,9 +100,7 @@ class JobHostClient:
                     body,
                 )
                 raise JobHostClientError(
-                    message=(
-                        f"Host '{host.name}' returned HTTP {response.status}"
-                    ),
+                    message=(f"Host '{host.name}' returned HTTP {response.status}"),
                     status_code=response.status,
                     host_id=host.id,
                     host_name=host.name,
@@ -121,9 +115,7 @@ class JobHostClient:
             )
             return body
 
-    async def get_job_status(
-        self, host: Host, job_id: str
-    ) -> dict[str, Any]:
+    async def get_job_status(self, host: Host, job_id: str) -> dict[str, Any]:
         """Get job status from ``GET {host.url}/jobs/{job_id}``."""
         session = await self._ensure_session()
         url = f"{host.url.rstrip('/')}/jobs/{job_id}"
@@ -158,9 +150,7 @@ class JobHostClient:
 
             return body
 
-    async def cancel_job(
-        self, host: Host, job_id: str
-    ) -> dict[str, Any]:
+    async def cancel_job(self, host: Host, job_id: str) -> dict[str, Any]:
         """Cancel a job via ``DELETE {host.url}/jobs/{job_id}``."""
         session = await self._ensure_session()
         url = f"{host.url.rstrip('/')}/jobs/{job_id}"

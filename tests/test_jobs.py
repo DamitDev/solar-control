@@ -3,14 +3,11 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
 
 from app.database.jobs import JobDB
 from app.jobs.host_selector import (
     select_host,
-    RoundRobinSelector,
     MostDiskSelector,
-    set_selector,
 )
 from app.jobs.client import JobHostClient, JobHostClientError
 from app.jobs.router import (
@@ -19,7 +16,6 @@ from app.jobs.router import (
 )
 from app.models import Host, HostStatus
 from app.models.job import Job, JobStatus
-
 
 # ── Fixtures ──────────────────────────────────────────────────
 
@@ -366,9 +362,7 @@ async def test_client_submit_job_success(online_training_host):
 async def test_client_submit_job_failure(online_training_host):
     """Host rejection should raise JobHostClientError."""
     client = JobHostClient()
-    client._session = _MockSession(
-        _MockResponse(400, {"error": "bad request"})
-    )
+    client._session = _MockSession(_MockResponse(400, {"error": "bad request"}))
 
     with pytest.raises(JobHostClientError) as exc:
         await client.submit_job(online_training_host, {"task": "train"})
@@ -513,5 +507,10 @@ async def test_should_emit_to_client_host_id_filter():
     from app.socketio_app.webui_handlers import _should_emit_to_client
 
     filt = {"host_ids": ["host-1"]}
-    assert await _should_emit_to_client(filt, "host_status", {"host_id": "host-1"}) is True
-    assert await _should_emit_to_client(filt, "host_status", {"host_id": "host-2"}) is False
+    assert (
+        await _should_emit_to_client(filt, "host_status", {"host_id": "host-1"}) is True
+    )
+    assert (
+        await _should_emit_to_client(filt, "host_status", {"host_id": "host-2"})
+        is False
+    )

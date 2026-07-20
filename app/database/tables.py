@@ -146,12 +146,8 @@ class JobRow(Base):
         ForeignKey("hosts.id", ondelete="SET NULL"),
         nullable=False,
     )
-    status: Mapped[str] = mapped_column(
-        Text, nullable=False, default="pending"
-    )
-    payload: Mapped[dict] = mapped_column(
-        JSONB, nullable=False, server_default="{}"
-    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(Text, nullable=True)

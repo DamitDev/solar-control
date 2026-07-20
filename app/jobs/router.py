@@ -9,12 +9,10 @@ Provides:
 import logging
 import uuid
 from typing import Any
-from datetime import datetime, timezone
 
 import aiohttp
 from fastapi import APIRouter, HTTPException
 
-from app.config import settings
 from app.database.hosts import host_db
 from app.database.jobs import job_db
 from app.jobs.client import JobHostClientError, job_client
@@ -116,16 +114,18 @@ def _translate_payload(
 
         elif step_name == "train":
             run_name = step_cfg.get("run_name", job_name)
-            output_dir = step_cfg.get(
-                "output_dir", f"/workspace/output/{run_name}"
-            )
+            output_dir = step_cfg.get("output_dir", f"/workspace/output/{run_name}")
             env["TRAINING_CONFIG"] = "/workspace/config/training.json"
             env["MODEL_DIR"] = _resolve_train_input(
-                steps_config, "download_model", "output_dir",
+                steps_config,
+                "download_model",
+                "output_dir",
                 "/workspace/models/model",
             )
             env["DATASET_DIR"] = _resolve_train_input(
-                steps_config, "download_dataset", "output_dir",
+                steps_config,
+                "download_dataset",
+                "output_dir",
                 "/workspace/data/dataset",
             )
             env["OUTPUT_DIR"] = output_dir
@@ -133,36 +133,35 @@ def _translate_payload(
 
         elif step_name == "convert_model":
             train_output = _resolve_train_input(
-                steps_config, "train", "output_dir",
+                steps_config,
+                "train",
+                "output_dir",
                 "/workspace/output/run",
             )
-            env["MODEL_INPUT"] = step_cfg.get(
-                "model_input", f"{train_output}/best"
-            )
-            env["MODEL_OUTPUT"] = step_cfg.get(
-                "model_output", f"{train_output}.gguf"
-            )
+            env["MODEL_INPUT"] = step_cfg.get("model_input", f"{train_output}/best")
+            env["MODEL_OUTPUT"] = step_cfg.get("model_output", f"{train_output}.gguf")
             env["QUANTIZATION"] = step_cfg.get("quantization", "Q4_K_M")
 
         elif step_name == "upload_model":
             env["MODEL_SOURCE_PATH"] = step_cfg.get(
                 "model_source_path",
                 _resolve_train_input(
-                    steps_config, "convert_model", "model_output",
+                    steps_config,
+                    "convert_model",
+                    "model_output",
                     _resolve_train_input(
-                        steps_config, "train", "output_dir",
+                        steps_config,
+                        "train",
+                        "output_dir",
                         "/workspace/output/run",
-                    ) + "/best",
+                    )
+                    + "/best",
                 ),
             )
-            env["HARBOR_TARGET_REF"] = step_cfg.get(
-                "harbor_target_ref", ""
-            )
+            env["HARBOR_TARGET_REF"] = step_cfg.get("harbor_target_ref", "")
             env["ARTIFACT_NAME"] = step_cfg.get("artifact_name", "")
             env["VERSION"] = step_cfg.get("version", "")
-            env["ARTIFACT_CATEGORY"] = step_cfg.get(
-                "artifact_category", "model"
-            )
+            env["ARTIFACT_CATEGORY"] = step_cfg.get("artifact_category", "model")
             env["METADATA_PATH"] = "/workspace/config/upload-metadata.json"
 
         step_envs[step_name] = env
@@ -175,18 +174,22 @@ def _translate_payload(
         training_config = {
             "name": run_name,
             "model": _resolve_train_input(
-                steps_config, "download_model", "output_dir",
+                steps_config,
+                "download_model",
+                "output_dir",
                 "/workspace/models/model",
             ),
             "tokenizer": _resolve_train_input(
-                steps_config, "download_model", "output_dir",
+                steps_config,
+                "download_model",
+                "output_dir",
                 "/workspace/models/model",
             ),
-            "output_dir": train_cfg.get(
-                "output_dir", f"/workspace/output/{run_name}"
-            ),
+            "output_dir": train_cfg.get("output_dir", f"/workspace/output/{run_name}"),
             "train_dataset": _resolve_train_input(
-                steps_config, "download_dataset", "output_dir",
+                steps_config,
+                "download_dataset",
+                "output_dir",
                 "/workspace/data/dataset",
             ),
         }
