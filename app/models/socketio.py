@@ -177,8 +177,8 @@ class InstanceStatePayload(BaseModel):
 class JobLogPayload(BaseModel):
     """Outgoing payload for job step log events to WebUI (S-025).
 
-    Enriched with job_id and correlation_id by Solar Control
-    before rebroadcast to WebUI clients.
+    Enriched with job_id, correlation_id, and step_name by Solar
+    Control before rebroadcast to WebUI clients.
     """
 
     job_id: str
@@ -189,6 +189,7 @@ class JobLogPayload(BaseModel):
     level: str = "info"
     correlation_id: str | None = None
     timestamp: str
+    step_name: str | None = None
 
 
 class JobLifecyclePayload(BaseModel):

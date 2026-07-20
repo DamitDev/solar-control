@@ -41,7 +41,7 @@ def upgrade() -> None:
                 "host_id",
                 sa.Text(),
                 sa.ForeignKey("hosts.id", ondelete="SET NULL"),
-                nullable=False,
+                nullable=True,
             ),
             sa.Column(
                 "status",
@@ -53,7 +53,7 @@ def upgrade() -> None:
                 "payload",
                 postgresql.JSONB(),
                 nullable=False,
-                server_default="{}",
+                server_default=sa.text("'{}'::jsonb"),
             ),
             sa.Column("result", postgresql.JSONB(), nullable=True),
             sa.Column("error_message", sa.Text(), nullable=True),

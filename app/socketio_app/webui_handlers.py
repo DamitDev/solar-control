@@ -138,11 +138,31 @@ async def broadcast_gateway_request(summary_data: dict[str, Any]) -> None:
     await sio.emit("gateway_request", summary_data, namespace="/webui")
 
 
+async def _emit_to_matching_clients(
+    event: str, data: dict[str, Any], namespace: str = "/webui"
+) -> None:
+    """Emit *event* with *data* only to clients whose filter allows it."""
+    participants = sio.manager.get_participants(namespace, namespace)
+    for sid, _ in participants:
+        async with sio.session(sid, namespace=namespace) as session:
+            session_filter = session.get("filter")
+        if await _should_emit_to_client(session_filter, event, data):
+            await sio.emit(event, data, to=sid, namespace=namespace)
+
+
 async def broadcast_job_log(payload: dict[str, Any]) -> None:
-    """Broadcast a job step log event to WebUI clients (S-025)."""
-    await sio.emit("job_log", payload, namespace="/webui")
+    """Broadcast a job step log event to WebUI clients (S-025).
+
+    Applies per-client filters so only clients whose filter matches
+    the event's host_id / job_id receive it.
+    """
+    await _emit_to_matching_clients("job_log", payload)
 
 
 async def broadcast_job_lifecycle(payload: dict[str, Any]) -> None:
-    """Broadcast a job lifecycle event to WebUI clients (S-026)."""
-    await sio.emit("job_lifecycle", payload, namespace="/webui")
+    """Broadcast a job lifecycle event to WebUI clients (S-026).
+
+    Applies per-client filters so only clients whose filter matches
+    the event's host_id / job_id receive it.
+    """
+    await _emit_to_matching_clients("job_lifecycle", payload)

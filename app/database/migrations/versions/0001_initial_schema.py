@@ -85,7 +85,12 @@ def upgrade() -> None:
                 sa.ForeignKey("api_endpoints.id", ondelete="SET NULL"),
                 nullable=True,
             ),
-            sa.Column("data", postgresql.JSONB(), server_default="{}", nullable=False),
+            sa.Column(
+                "data",
+                postgresql.JSONB(),
+                server_default=sa.text("'{}'::jsonb"),
+                nullable=False,
+            ),
             sa.Column(
                 "timestamp",
                 sa.DateTime(timezone=True),

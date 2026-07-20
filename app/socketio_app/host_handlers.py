@@ -507,8 +507,11 @@ async def host_step_log(sid: str, data: dict[str, Any]):
         level=data.get("level", "info"),
         correlation_id=data.get("correlation_id"),
         timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        step_name=data.get("step_name"),
     )
-    await sio.emit("job_log", payload.model_dump(), namespace="/webui")
+    from .webui_handlers import broadcast_job_log as _b
+
+    await _b(payload.model_dump())
 
 
 @sio.on("step_log_batch", namespace="/hosts")
@@ -535,11 +538,14 @@ async def host_step_log_batch(sid: str, data: dict[str, Any]):
             level=entry.get("level", "info"),
             correlation_id=entry.get("correlation_id"),
             timestamp=entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            step_name=entry.get("step_name"),
         ).model_dump()
         for entry in entries
     ]
+    from .webui_handlers import broadcast_job_log as _b
+
     await asyncio.gather(
-        *[sio.emit("job_log", p, namespace="/webui") for p in payloads],
+        *[_b(p) for p in payloads],
         return_exceptions=True,
     )
 
@@ -574,4 +580,6 @@ async def host_job_lifecycle(sid: str, data: dict[str, Any]):
         data=data.get("data", {}),
         timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
     )
-    await sio.emit("job_lifecycle", payload.model_dump(), namespace="/webui")
+    from .webui_handlers import broadcast_job_lifecycle as _b
+
+    await _b(payload.model_dump())

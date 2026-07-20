@@ -124,10 +124,11 @@ async def test_select_host_filters_by_role(online_training_host, inference_only_
     """Only hosts with role='training' should be considered."""
     with patch(
         "app.jobs.host_selector.host_db.get_all_hosts",
-        AsyncMock(return_value=[online_training_host]),
+        AsyncMock(return_value=[online_training_host, inference_only_host]),
     ):
         host = await select_host(role="training", min_disk_gb=10.0)
         assert "training" in host.roles
+        assert "gpu" not in host.roles
 
 
 @pytest.mark.anyio
@@ -418,6 +419,9 @@ async def test_job_db_update_status():
     with patch.object(db, "_session") as mock_session_ctx:
         mock_session = AsyncMock()
         mock_session_ctx.return_value.__aenter__.return_value = mock_session
+        mock_execute_result = AsyncMock()
+        mock_execute_result.rowcount = 1
+        mock_session.execute.return_value = mock_execute_result
 
         result = await db.update_job_status("job-1", JobStatus.COMPLETED)
         assert result is True

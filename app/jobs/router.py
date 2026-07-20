@@ -86,7 +86,7 @@ def _translate_payload(
         "model_selection": payload.get("model_selection"),
         "deployment": payload.get("deployment"),
         "retention_hours": payload.get("retention_hours", 24),
-        "steps": {},
+        "steps": {name: steps_config.get(name, {}) for name in pipeline},
     }
 
     # --- Derive per-step environment variables (S-021 Section 4.3) ---
@@ -310,7 +310,7 @@ async def create_job(data: JobCreate):
         )
 
     # 5. Mark running
-    await job_db.update_job_status(job_id, JobStatus.RUNNING)
+    await job_db.update_job_status(job_id, JobStatus.RUNNING, result=result)
     job.status = JobStatus.RUNNING
     job.result = result
 

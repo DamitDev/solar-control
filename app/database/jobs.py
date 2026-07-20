@@ -109,29 +109,29 @@ class JobDB:
             values["completed_at"] = datetime.now(timezone.utc)
 
         async with self._session() as session:
-            await session.execute(
+            result = await session.execute(
                 update(JobRow).where(JobRow.id == job_id).values(**values)
             )
             await session.commit()
-            return True
+            return result.rowcount > 0
 
     async def update_job_host(self, job_id: str, host_id: str) -> bool:
         """Update the host assigned to a job."""
         async with self._session() as session:
-            await session.execute(
+            result = await session.execute(
                 update(JobRow)
                 .where(JobRow.id == job_id)
                 .values(host_id=host_id, updated_at=datetime.now(timezone.utc))
             )
             await session.commit()
-            return True
+            return result.rowcount > 0
 
     async def remove_job(self, job_id: str) -> bool:
         """Delete a job record."""
         async with self._session() as session:
-            await session.execute(delete(JobRow).where(JobRow.id == job_id))
+            result = await session.execute(delete(JobRow).where(JobRow.id == job_id))
             await session.commit()
-            return True
+            return result.rowcount > 0
 
 
 job_db = JobDB()

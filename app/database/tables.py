@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -79,7 +80,9 @@ class GatewayEventRow(Base):
         ForeignKey("api_endpoints.id", ondelete="SET NULL"),
         nullable=True,
     )
-    data: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    data: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -144,10 +147,12 @@ class JobRow(Base):
     host_id: Mapped[str] = mapped_column(
         Text,
         ForeignKey("hosts.id", ondelete="SET NULL"),
-        nullable=False,
+        nullable=True,
     )
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
