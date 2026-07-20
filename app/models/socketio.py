@@ -172,3 +172,37 @@ class InstanceStatePayload(BaseModel):
     instance_id: str | None
     timestamp: str
     data: dict[str, Any]
+
+
+class JobLogPayload(BaseModel):
+    """Outgoing payload for job step log events to WebUI (S-025).
+
+    Enriched with job_id and correlation_id by Solar Control
+    before rebroadcast to WebUI clients.
+    """
+
+    job_id: str
+    host_id: str
+    host_name: str | None
+    seq: int
+    line: str
+    level: str = "info"
+    correlation_id: str | None = None
+    timestamp: str
+
+
+class JobLifecyclePayload(BaseModel):
+    """Outgoing payload for job lifecycle events to WebUI (S-026).
+
+    Events: ``started``, ``step_started``, ``step_completed``,
+    ``step_failed``, ``completed``, ``failed``, ``cancelled``.
+    """
+
+    job_id: str
+    host_id: str
+    host_name: str | None
+    event: str
+    step_name: str | None = None
+    correlation_id: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    timestamp: str

@@ -128,3 +128,39 @@ class GatewayRequestRow(Base):
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     decode_tps: Mapped[float | None] = mapped_column(Double, nullable=True)
     decode_ms_per_token: Mapped[float | None] = mapped_column(Double, nullable=True)
+
+
+class JobRow(Base):
+    """A job step routed through Solar Control to a Solar Host."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        Index("idx_jobs_status", "status"),
+        Index("idx_jobs_host_id", "host_id"),
+        Index("idx_jobs_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    host_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("hosts.id", ondelete="SET NULL"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending"
+    )
+    payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

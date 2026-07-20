@@ -40,5 +40,9 @@ class Settings(BaseSettings):
     db_pool_size: int = 20
     db_max_overflow: int = 10
 
+    # Job step execution
+    job_min_disk_gb: float = 50.0
+    job_submission_timeout_s: float = 30.0
+
 
 settings = Settings()

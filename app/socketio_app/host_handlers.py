@@ -25,6 +25,8 @@ from app.models.socketio import (
     HostStatusPayload,
     InstancesUpdatePayload,
     InstanceStatePayload,
+    JobLifecyclePayload,
+    JobLogPayload,
     LogPayload,
     WSRegistration,
 )
@@ -471,3 +473,111 @@ async def host_instances_update(sid: str, data: dict[str, Any]):
         )
     except Exception:
         pass
+
+
+# ── Job event handlers (S-025 step_log, S-026 lifecycle) ────
+
+
+@sio.on("step_log", namespace="/hosts")
+async def host_step_log(sid: str, data: dict[str, Any]):
+    """Receive a step log line from a host and rebroadcast to WebUI.
+
+    Expected payload from host (S-025):
+        {
+            "job_id": "...",
+            "step_name": "train",
+            "seq": 42,
+            "line": "Epoch 3/10 loss=0.42",
+            "level": "info",
+            "correlation_id": "...",
+            "timestamp": "..."
+        }
+    """
+    host_id = await host_store.get_host_id_for_sid(sid)
+    if not host_id:
+        return
+
+    host = await host_db.get_host(host_id)
+    payload = JobLogPayload(
+        job_id=data.get("job_id", ""),
+        host_id=host_id,
+        host_name=host.name if host else None,
+        seq=data.get("seq", 0),
+        line=data.get("line", ""),
+        level=data.get("level", "info"),
+        correlation_id=data.get("correlation_id"),
+        timestamp=data.get(
+            "timestamp", datetime.now(timezone.utc).isoformat()
+        ),
+    )
+    await sio.emit("job_log", payload.model_dump(), namespace="/webui")
+
+
+@sio.on("step_log_batch", namespace="/hosts")
+async def host_step_log_batch(sid: str, data: dict[str, Any]):
+    """Handle batched step log entries from a host."""
+    host_id = await host_store.get_host_id_for_sid(sid)
+    if not host_id:
+        return
+
+    entries: list[dict[str, Any]] = data.get("entries", [])
+    if not entries:
+        return
+
+    host = await host_db.get_host(host_id)
+    host_name = host.name if host else None
+
+    payloads = [
+        JobLogPayload(
+            job_id=entry.get("job_id", ""),
+            host_id=host_id,
+            host_name=host_name,
+            seq=entry.get("seq", 0),
+            line=entry.get("line", ""),
+            level=entry.get("level", "info"),
+            correlation_id=entry.get("correlation_id"),
+            timestamp=entry.get(
+                "timestamp", datetime.now(timezone.utc).isoformat()
+            ),
+        ).model_dump()
+        for entry in entries
+    ]
+    await asyncio.gather(
+        *[sio.emit("job_log", p, namespace="/webui") for p in payloads],
+        return_exceptions=True,
+    )
+
+
+@sio.on("job_lifecycle", namespace="/hosts")
+async def host_job_lifecycle(sid: str, data: dict[str, Any]):
+    """Receive a job lifecycle event from a host and rebroadcast to WebUI.
+
+    Expected payload from host (S-026):
+        {
+            "job_id": "...",
+            "event": "step_started",  # started | step_started | step_completed
+                                     # | step_failed | completed | failed | cancelled
+            "step_name": "train",     # optional, present for step_* events
+            "correlation_id": "...",
+            "data": { ... },          # optional payload (exit code, metrics, etc.)
+            "timestamp": "..."
+        }
+    """
+    host_id = await host_store.get_host_id_for_sid(sid)
+    if not host_id:
+        return
+
+    host = await host_db.get_host(host_id)
+    payload = JobLifecyclePayload(
+        job_id=data.get("job_id", ""),
+        host_id=host_id,
+        host_name=host.name if host else None,
+        event=data.get("event", ""),
+        step_name=data.get("step_name"),
+        correlation_id=data.get("correlation_id"),
+        data=data.get("data", {}),
+        timestamp=data.get(
+            "timestamp", datetime.now(timezone.utc).isoformat()
+        ),
+    )
+    await sio.emit("job_lifecycle", payload.model_dump(), namespace="/webui")
