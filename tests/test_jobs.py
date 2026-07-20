@@ -5,10 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.database.jobs import JobDB
-from app.jobs.host_selector import (
-    select_host,
-    MostDiskSelector,
-)
+from app.jobs.host_selector import select_host
 from app.jobs.client import JobHostClient, JobHostClientError
 from app.jobs.router import (
     _translate_payload,
@@ -124,11 +121,7 @@ def sample_supernova_payload():
 
 @pytest.mark.anyio
 async def test_select_host_filters_by_role(online_training_host, inference_only_host):
-    """Only hosts with role='training' should be considered.
-
-    The mock simulates ``host_db.get_all_hosts(role='training')`` which
-    should only return training-capable hosts.
-    """
+    """Only hosts with role='training' should be considered."""
     with patch(
         "app.jobs.host_selector.host_db.get_all_hosts",
         AsyncMock(return_value=[online_training_host]),
@@ -182,8 +175,8 @@ async def test_select_host_empty_list():
 
 
 @pytest.mark.anyio
-async def test_most_disk_selector(online_training_host, low_disk_host):
-    """MostDiskSelector should pick the host with the most free space."""
+async def test_select_host_picks_most_disk(online_training_host, low_disk_host):
+    """Should pick the host with the most available disk."""
     big_disk_host = Host(
         id="host-big",
         name="Big Disk",
@@ -197,11 +190,7 @@ async def test_most_disk_selector(online_training_host, low_disk_host):
         "app.jobs.host_selector.host_db.get_all_hosts",
         AsyncMock(return_value=[online_training_host, low_disk_host, big_disk_host]),
     ):
-        host = await select_host(
-            role="training",
-            min_disk_gb=10.0,
-            selector=MostDiskSelector(),
-        )
+        host = await select_host(role="training", min_disk_gb=10.0)
         assert host.id == "host-big"
 
 
