@@ -155,6 +155,9 @@ async def root():
                 "/api/endpoints",
                 "/api/gateway/stats",
                 "/api/gateway/requests",
+                "/api/models/availability",
+                "/api/models/distribute",
+                "/api/resources",
             ],
             "realtime": [
                 "Socket.IO /hosts (host connections)",

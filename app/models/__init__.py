@@ -2,8 +2,10 @@ from .gateway import (
     RegistryEntry as RegistryEntry,
 )
 from .host import (
+    AggregatedResourceResponse as AggregatedResourceResponse,
     Host as Host,
     HostCreate as HostCreate,
+    HostResourceSnapshot as HostResourceSnapshot,
     HostResponse as HostResponse,
     HostStatus as HostStatus,
     MemoryInfo as MemoryInfo,

@@ -57,3 +57,74 @@ class HostResponse(BaseModel):
 
     host: Host
     message: str
+
+
+class HostResourceSnapshot(BaseModel):
+    """Per-host resource snapshot in the aggregated cluster view (S-035).
+
+    Combines locally stored metadata (roles, GPU type) with live resource
+    data proxied from the solar-host ``GET /resources`` endpoint.
+
+    Resource availability follows S-034 semantics:
+    ``available = total - (system_used + reserved_headroom)`` where
+    ``reserved_headroom = Σ max(reserved − actual, 0)`` per reservation.
+    """
+
+    host_id: str
+    host_name: str
+    url: str
+    status: HostStatus
+    roles: list[str] = Field(default_factory=list)
+    gpu_type: str | None = None
+    version: str | None = None
+
+    # Whether the host was reachable for live resource data
+    reachable: bool = False
+    error: str | None = None
+
+    # Total resources (from hardware)
+    vram_total_gb: float | None = None
+    ram_total_gb: float | None = None
+    disk_total_gb: float | None = None
+
+    # System-level usage (OS + idle backends)
+    vram_system_used_gb: float | None = None
+    ram_system_used_gb: float | None = None
+    disk_system_used_gb: float | None = None
+
+    # Reservation headroom (Σ max(reserved - actual, 0))
+    vram_reserved_headroom_gb: float | None = None
+    ram_reserved_headroom_gb: float | None = None
+    disk_reserved_headroom_gb: float | None = None
+
+    # Reported used = system_used + reserved_headroom
+    vram_reported_used_gb: float | None = None
+    ram_reported_used_gb: float | None = None
+    disk_reported_used_gb: float | None = None
+
+    # Available = total - reported_used
+    vram_available_gb: float | None = None
+    ram_available_gb: float | None = None
+    disk_available_gb: float | None = None
+
+    # Running workloads (from Redis instance cache)
+    instance_count: int = 0
+    running_instance_count: int = 0
+
+    # Reservation summary (totals only — no per-reservation list)
+    reservation_count: int = 0
+    reservation_vram_total_gb: float = 0.0
+    reservation_ram_total_gb: float = 0.0
+    reservation_disk_total_gb: float = 0.0
+
+    # Timestamps
+    snapshot_timestamp: str | None = None
+
+
+class AggregatedResourceResponse(BaseModel):
+    """Aggregated cluster-wide resource view (S-035)."""
+
+    hosts: list[HostResourceSnapshot]
+    total_hosts: int
+    reachable_hosts: int
+    unreachable_hosts: int
