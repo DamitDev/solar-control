@@ -158,6 +158,7 @@ async def root():
                 "/api/models/availability",
                 "/api/models/distribute",
                 "/api/resources",
+                "/api/instances/migrate",
             ],
             "realtime": [
                 "Socket.IO /hosts (host connections)",

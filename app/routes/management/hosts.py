@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from app.models import Host, HostCreate, HostResponse, HostStatus
 from app.database.hosts import host_db
-from app.model_resolvers import resolve
 from app.validation import validate_priority
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
@@ -272,62 +271,16 @@ async def restart_instance(host_id: str, instance_id: str):
 
 @router.post("/{host_id}/instances")
 async def create_instance(host_id: str, instance_data: dict[str, Any]):
+    """Create an inference instance on a host.
+
+    Delegates to the shared ``create_instance_on_host`` helper (S-037 /
+    Option B refactor) which validates priority (S-036), resolves
+    ``model_source`` (S-019), and POSTs to the host.
+    """
+    from app.services.migration import create_instance_on_host
+
     host = _require_host(await host_db.get_host(host_id))
-
-    # Validate priority if present (S-036)
-    validate_priority(instance_data)
-
-    # Resolve model_source if present.
-    # The resolved local:// URI is used to set model/model_id so the host can
-    # create the instance.  The original model_source URI (repo://, huggingface://)
-    # is preserved for cross-host operations such as migration (S-037).
-    # Support both flat and {config: {...}} payload shapes.
-    config = instance_data.get("config", instance_data)
-    model_source = config.get("model_source")
-    if model_source:
-        resolved = await resolve(model_source, host.url, host.api_key)
-        # Extract filesystem path from local:// URI
-        # local:// is always 8 chars; the path starts at index 8.
-        if resolved.startswith("local://"):
-            model_path = resolved[8:]
-        else:
-            model_path = resolved
-        backend_type = config.get("backend_type", "llamacpp")
-        if backend_type.startswith("huggingface"):
-            config["model_id"] = model_path
-        else:
-            config["model"] = model_path
-        if "config" in instance_data:
-            instance_data["config"] = config
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{host.url}/instances"
-            headers = {"X-API-Key": host.api_key, "Content-Type": "application/json"}
-            async with session.post(
-                url,
-                json=instance_data,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                text = await response.text()
-                raise HTTPException(status_code=response.status, detail=text)
-    except HTTPException:
-        raise
-    except (
-        aiohttp.ClientConnectionError,
-        aiohttp.ClientConnectorError,
-        asyncio.TimeoutError,
-    ):
-        raise HTTPException(
-            status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=502, detail=f"Cannot reach host '{host.name}': {e}"
-        )
+    return await create_instance_on_host(host, instance_data)
 
 
 @router.put("/{host_id}/instances/{instance_id}")
