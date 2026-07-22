@@ -11,23 +11,9 @@ from pydantic import BaseModel
 from app.models import Host, HostCreate, HostResponse, HostStatus
 from app.database.hosts import host_db
 from app.model_resolvers import resolve
+from app.validation import validate_priority
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
-
-VALID_PRIORITIES = {"production", "staging", "ephemeral"}
-
-
-def _validate_priority(instance_data: dict[str, Any]) -> None:
-    """Validate the priority field if present (S-036)."""
-    priority = instance_data.get("priority")
-    if priority is not None and priority not in VALID_PRIORITIES:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Invalid priority '{priority}'. "
-                f"Must be one of: {', '.join(sorted(VALID_PRIORITIES))}"
-            ),
-        )
 
 
 class PendingApproveRequest(BaseModel):
@@ -289,7 +275,7 @@ async def create_instance(host_id: str, instance_data: dict[str, Any]):
     host = _require_host(await host_db.get_host(host_id))
 
     # Validate priority if present (S-036)
-    _validate_priority(instance_data)
+    validate_priority(instance_data)
 
     # Resolve model_source if present
     model_source = instance_data.get("model_source")
@@ -332,7 +318,7 @@ async def update_instance(
     host_id: str, instance_id: str, instance_data: dict[str, Any]
 ):
     # Validate priority if present (S-036)
-    _validate_priority(instance_data)
+    validate_priority(instance_data)
     return await _proxy_instance_action(
         host_id, instance_id, "", method="PUT", json_data=instance_data, timeout=10
     )
