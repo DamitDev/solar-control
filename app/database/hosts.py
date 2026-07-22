@@ -100,7 +100,7 @@ class HostDB:
         async with self._session() as session:
             stmt = select(HostRow).order_by(HostRow.created_at)
             if role:
-                stmt = stmt.where(HostRow.roles.op("@>")(f'["{role}"]'))
+                stmt = stmt.where(HostRow.roles.contains([role]))
             result = await session.execute(stmt)
             return [self._row_to_host(row) for row in result.scalars()]
 
