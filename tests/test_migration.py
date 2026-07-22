@@ -773,3 +773,97 @@ async def test_migrate_rejected_source_has_training_jobs(
             )
         assert exc.value.status_code == 409
         assert "training" in exc.value.detail.lower()
+
+
+@pytest.mark.anyio
+async def test_migrate_invalid_priority_in_captured_config(
+    source_host, target_host
+):
+    """Migration fails early when captured config has an invalid priority.
+
+    This prevents the bug where a legacy instance with priority='dev'
+    would be stopped on the source but fail at create_target step.
+    """
+    invalid_config = {
+        "instance_id": "inst-legacy",
+        "config": {
+            "alias": "legacy-model:v1",
+            "model_source": "repo://legacy:v1",
+            "backend_type": "huggingface_classification",
+            "priority": "dev",  # invalid — not in {production, staging, ephemeral}
+        },
+    }
+
+    with patch(
+        "app.services.migration.host_db"
+    ) as mock_db, patch(
+        "app.services.migration.host_store"
+    ) as mock_store, patch(
+        "app.services.migration.check_no_active_training"
+    ) as mock_train_check:
+        mock_db.get_host = AsyncMock(
+            side_effect=lambda hid: source_host
+            if hid == "host-src"
+            else target_host
+            if hid == "host-tgt"
+            else None
+        )
+        mock_store.get_host_instances = AsyncMock(
+            return_value=[invalid_config]
+        )
+        mock_train_check.return_value = None
+
+        with pytest.raises(HTTPException) as exc:
+            await execute_migration(
+                instance_id="inst-legacy",
+                source_host_id="host-src",
+                target_host_id="host-tgt",
+            )
+        assert exc.value.status_code == 422
+        assert "invalid priority" in exc.value.detail.lower()
+        assert "dev" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_training_check_unreachable_rejected(
+    source_host, target_host, instance_config
+):
+    """Migration is rejected when source host is unreachable for training check."""
+    with patch(
+        "app.services.migration.host_db"
+    ) as mock_db, patch(
+        "app.services.migration.host_store"
+    ) as mock_store:
+        mock_db.get_host = AsyncMock(
+            side_effect=lambda hid: source_host
+            if hid == "host-src"
+            else target_host
+            if hid == "host-tgt"
+            else None
+        )
+        mock_store.get_host_instances = AsyncMock(
+            return_value=[instance_config]
+        )
+
+        # Simulate the training job check hitting a connection error.
+        # The real check_no_active_training now raises HTTPException(502)
+        # on connectivity failures instead of silently proceeding.
+        with patch(
+            "app.services.migration.check_no_active_training",
+            side_effect=HTTPException(
+                status_code=502,
+                detail=(
+                    "Source host 'Source Host' is unreachable for training "
+                    "job check at http://source:8000. Cannot verify no active "
+                    "training jobs – migration rejected."
+                ),
+            ),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await execute_migration(
+                    instance_id="inst-1",
+                    source_host_id="host-src",
+                    target_host_id="host-tgt",
+                )
+            assert exc.value.status_code == 502
+            assert "training" in exc.value.detail.lower()

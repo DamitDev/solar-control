@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.models import Host, HostCreate, HostResponse, HostStatus
 from app.database.hosts import host_db
+from app.services.migration import create_instance_on_host
 from app.validation import validate_priority
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
@@ -277,8 +278,6 @@ async def create_instance(host_id: str, instance_data: dict[str, Any]):
     Option B refactor) which validates priority (S-036), resolves
     ``model_source`` (S-019), and POSTs to the host.
     """
-    from app.services.migration import create_instance_on_host
-
     host = _require_host(await host_db.get_host(host_id))
     return await create_instance_on_host(host, instance_data)
 

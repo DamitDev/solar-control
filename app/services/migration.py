@@ -401,16 +401,21 @@ async def check_no_active_training(host: Host) -> None:
         aiohttp.ClientConnectorError,
         asyncio.TimeoutError,
     ):
-        logger.warning(
-            "Source host '%s' unreachable for training job check, "
-            "proceeding with migration",
-            host.name,
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Source host '{host.name}' is unreachable for training job "
+                f"check at {host.url}. Cannot verify no active training jobs "
+                f"– migration rejected."
+            ),
         )
     except Exception as e:
-        logger.warning(
-            "Failed to check training jobs on host '%s': %s",
-            host.name,
-            e,
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Cannot reach source host '{host.name}' for training job "
+                f"check: {e}. Migration rejected."
+            ),
         )
 
 
@@ -567,6 +572,18 @@ async def execute_migration(
         raise HTTPException(
             status_code=422,
             detail="Instance configuration is missing required 'model_source' field",
+        )
+
+    # Validate captured priority before any destructive operations (S-036/S-037).
+    # Legacy instances may have invalid priorities that would fail at create_target
+    # step (step 7) after the source instance has already been stopped.
+    if priority not in VALID_PRIORITIES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Captured instance has invalid priority '{priority}'. "
+                f"Must be one of: {', '.join(sorted(VALID_PRIORITIES))}"
+            ),
         )
 
     steps.append(
