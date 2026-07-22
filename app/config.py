@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Job step execution
     job_min_disk_gb: float = 50.0
     job_submission_timeout_s: float = 30.0
+    # Fallback container image registry/tag for pipeline steps when the
+    # SuperNova intent does not specify an explicit `image` per step.
+    # When empty, an explicit image is required for every step.
+    job_step_image_registry: str = ""
+    job_step_image_tag: str = "latest"
 
 
 settings = Settings()

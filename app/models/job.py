@@ -16,6 +16,20 @@ class JobStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+    @classmethod
+    def from_host(cls, value: str | None) -> "JobStatus | None":
+        """Map a Solar Host status string to a :class:`JobStatus`.
+
+        Returns ``None`` for unknown/empty values so callers can decide
+        whether to leave the current status untouched.
+        """
+        if not value:
+            return None
+        try:
+            return cls(value.lower())
+        except ValueError:
+            return None
+
 
 class Job(BaseModel):
     """A job step routed through Solar Control to a Solar Host."""
@@ -38,6 +52,10 @@ class Job(BaseModel):
     correlation_id: str | None = Field(
         default=None,
         description="Correlation ID for matching S-025/S-026 events to this job",
+    )
+    submission_id: str | None = Field(
+        default=None,
+        description="Optional SuperNova submission ID, forwarded to the host",
     )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -80,6 +98,10 @@ class JobCreate(BaseModel):
     correlation_id: str | None = Field(
         default=None,
         description="Optional correlation ID for event matching",
+    )
+    submission_id: str | None = Field(
+        default=None,
+        description="Optional SuperNova submission ID, forwarded to the host",
     )
 
 

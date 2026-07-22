@@ -58,6 +58,7 @@ def upgrade() -> None:
             sa.Column("result", postgresql.JSONB(), nullable=True),
             sa.Column("error_message", sa.Text(), nullable=True),
             sa.Column("correlation_id", sa.Text(), nullable=True),
+            sa.Column("submission_id", sa.Text(), nullable=True),
             sa.Column(
                 "created_at",
                 sa.DateTime(timezone=True),

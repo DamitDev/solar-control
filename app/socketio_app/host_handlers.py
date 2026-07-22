@@ -18,7 +18,9 @@ from datetime import datetime, timezone
 
 from .server import sio
 from app.database.hosts import host_db
+from app.database.jobs import job_db
 from app.models import Host, HostStatus
+from app.models.job import JobStatus
 from app.models.socketio import (
     HostHealthPayload,
     HostPendingPayload,
@@ -476,110 +478,167 @@ async def host_instances_update(sid: str, data: dict[str, Any]):
 
 
 # ── Job event handlers (S-025 step_log, S-026 lifecycle) ────
+#
+# Solar Host emits step logs as a *batch* under the ``step_log`` event
+# (``{"entries": [...]}``) and lifecycle transitions as *distinct* events
+# (``job_started``, ``job_completed``, ``job_failed``, ``job_cancelled``,
+# ``step_started``, ``step_completed``, ``step_failed``). Solar Control
+# enriches each with the job ``correlation_id`` (from the ``jobs`` table),
+# persists job-level status transitions, and rebroadcasts to WebUI.
+
+# Job-level lifecycle events → the persisted status they imply.
+_LIFECYCLE_STATUS: dict[str, JobStatus] = {
+    "job_started": JobStatus.RUNNING,
+    "job_completed": JobStatus.COMPLETED,
+    "job_failed": JobStatus.FAILED,
+    "job_cancelled": JobStatus.CANCELLED,
+}
+
+# All lifecycle event names Solar Host emits (S-026).
+_LIFECYCLE_EVENTS: tuple[str, ...] = (
+    *(_LIFECYCLE_STATUS.keys()),
+    "step_started",
+    "step_completed",
+    "step_failed",
+)
+
+# Fields consumed into the normalized payload; everything else is forwarded
+# under ``data`` so no host-provided context is lost.
+_LIFECYCLE_RESERVED = frozenset(
+    {"job_id", "host_id", "status", "step_name", "step_index", "timestamp", "event"}
+)
+
+# Small job_id → correlation_id cache to avoid a DB lookup per log line.
+_MAX_CORRELATION_CACHE = 4096
+_correlation_cache: dict[str, str | None] = {}
+
+
+async def _get_correlation_id(job_id: str) -> str | None:
+    """Resolve a job's correlation_id, caching the result.
+
+    The host uses Solar Control's ``job_id`` as the ``JobDefinition.job_id``,
+    so the ``jobs`` table can be looked up directly by the event's job_id.
+    """
+    if not job_id:
+        return None
+    if job_id in _correlation_cache:
+        return _correlation_cache[job_id]
+    job = await job_db.get_job(job_id)
+    corr = job.correlation_id if job else None
+    if len(_correlation_cache) >= _MAX_CORRELATION_CACHE:
+        _correlation_cache.clear()
+    _correlation_cache[job_id] = corr
+    return corr
 
 
 @sio.on("step_log", namespace="/hosts")
 async def host_step_log(sid: str, data: dict[str, Any]):
-    """Receive a step log line from a host and rebroadcast to WebUI.
+    """Receive step log entries from a host and rebroadcast to WebUI (S-025).
 
-    Expected payload from host (S-025):
+    The host sends a batch under the ``step_log`` event; a single-entry shape
+    is also tolerated for robustness. Each entry:
         {
-            "job_id": "...",
-            "step_name": "train",
-            "seq": 42,
-            "line": "Epoch 3/10 loss=0.42",
-            "level": "info",
-            "correlation_id": "...",
-            "timestamp": "..."
+            "job_id": "...", "step_name": "train", "step_index": 2,
+            "stream": "stdout", "seq": 42, "line": "Epoch 3/10 loss=0.42",
+            "timestamp": "...", "completed": false, "exit_code": null
         }
     """
     host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
-    host = await host_db.get_host(host_id)
-    payload = JobLogPayload(
-        job_id=data.get("job_id", ""),
-        host_id=host_id,
-        host_name=host.name if host else None,
-        seq=data.get("seq", 0),
-        line=data.get("line", ""),
-        level=data.get("level", "info"),
-        correlation_id=data.get("correlation_id"),
-        timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-        step_name=data.get("step_name"),
-    )
-    from .webui_handlers import broadcast_job_log as _b
-
-    await _b(payload.model_dump())
-
-
-@sio.on("step_log_batch", namespace="/hosts")
-async def host_step_log_batch(sid: str, data: dict[str, Any]):
-    """Handle batched step log entries from a host."""
-    host_id = await host_store.get_host_id_for_sid(sid)
-    if not host_id:
-        return
-
-    entries: list[dict[str, Any]] = data.get("entries", [])
+    entries: list[dict[str, Any]] = data.get("entries")
+    if entries is None:
+        entries = [data]  # tolerate a single-entry payload
     if not entries:
         return
 
     host = await host_db.get_host(host_id)
     host_name = host.name if host else None
 
-    payloads = [
-        JobLogPayload(
-            job_id=entry.get("job_id", ""),
-            host_id=host_id,
-            host_name=host_name,
-            seq=entry.get("seq", 0),
-            line=entry.get("line", ""),
-            level=entry.get("level", "info"),
-            correlation_id=entry.get("correlation_id"),
-            timestamp=entry.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            step_name=entry.get("step_name"),
-        ).model_dump()
-        for entry in entries
-    ]
+    payloads: list[dict[str, Any]] = []
+    for entry in entries:
+        job_id = str(entry.get("job_id", ""))
+        payloads.append(
+            JobLogPayload(
+                job_id=job_id,
+                host_id=host_id,
+                host_name=host_name,
+                step_name=entry.get("step_name"),
+                step_index=entry.get("step_index"),
+                stream=entry.get("stream"),
+                seq=entry.get("seq", 0),
+                line=entry.get("line", ""),
+                completed=bool(entry.get("completed", False)),
+                exit_code=entry.get("exit_code"),
+                correlation_id=await _get_correlation_id(job_id),
+                timestamp=entry.get(
+                    "timestamp", datetime.now(timezone.utc).isoformat()
+                ),
+            ).model_dump()
+        )
+
     from .webui_handlers import broadcast_job_log as _b
 
-    await asyncio.gather(
-        *[_b(p) for p in payloads],
-        return_exceptions=True,
-    )
+    await asyncio.gather(*[_b(p) for p in payloads], return_exceptions=True)
 
 
-@sio.on("job_lifecycle", namespace="/hosts")
-async def host_job_lifecycle(sid: str, data: dict[str, Any]):
-    """Receive a job lifecycle event from a host and rebroadcast to WebUI.
+# Some host versions may emit an explicit ``step_log_batch`` — alias it.
+sio.on("step_log_batch", host_step_log, namespace="/hosts")
 
-    Expected payload from host (S-026):
-        {
-            "job_id": "...",
-            "event": "step_started",  # started | step_started | step_completed
-                                     # | step_failed | completed | failed | cancelled
-            "step_name": "train",     # optional, present for step_* events
-            "correlation_id": "...",
-            "data": { ... },          # optional payload (exit code, metrics, etc.)
-            "timestamp": "..."
-        }
-    """
+
+async def _handle_job_lifecycle(
+    event_name: str, sid: str, data: dict[str, Any]
+) -> None:
+    """Normalize, persist, and rebroadcast a host lifecycle event (S-026)."""
     host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
     host = await host_db.get_host(host_id)
+    job_id = str(data.get("job_id", ""))
+
+    extras = {k: v for k, v in data.items() if k not in _LIFECYCLE_RESERVED}
     payload = JobLifecyclePayload(
-        job_id=data.get("job_id", ""),
+        job_id=job_id,
         host_id=host_id,
         host_name=host.name if host else None,
-        event=data.get("event", ""),
+        event=event_name,
+        status=data.get("status"),
         step_name=data.get("step_name"),
-        correlation_id=data.get("correlation_id"),
-        data=data.get("data", {}),
+        step_index=data.get("step_index"),
+        correlation_id=await _get_correlation_id(job_id),
+        data=extras,
         timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
     )
+
+    # Persist job-level status transitions (step_* events don't change it).
+    new_status = _LIFECYCLE_STATUS.get(event_name)
+    if new_status and job_id:
+        error_message = data.get("error_message") or data.get("error_summary")
+        await job_db.update_job_status(
+            job_id,
+            new_status,
+            error_message=error_message if new_status == JobStatus.FAILED else None,
+        )
+        if new_status in (
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        ):
+            _correlation_cache.pop(job_id, None)
+
     from .webui_handlers import broadcast_job_lifecycle as _b
 
     await _b(payload.model_dump())
+
+
+def _make_lifecycle_handler(event_name: str):
+    async def _handler(sid: str, data: dict[str, Any]):
+        await _handle_job_lifecycle(event_name, sid, data)
+
+    return _handler
+
+
+for _event_name in _LIFECYCLE_EVENTS:
+    sio.on(_event_name, _make_lifecycle_handler(_event_name), namespace="/hosts")
