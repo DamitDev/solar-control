@@ -147,7 +147,20 @@ Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending un
 - `GET /api/gateway/requests` - Paginated request history with filtering
 - `GET /api/gateway/events/recent` - Recent routing events (errors, reroutes)
 
+### Model Management
+
+- `GET /api/models/availability` - Which models exist on which hosts
+- `POST /api/models/distribute` - Distribute (pull) a model to target hosts from its authoritative source
+
+### Resource Queries
+
+- `GET /api/resources` - Aggregated cluster-wide view of host capacity, workloads, and reservations. Supports filters: `role`, `gpu_type`, `min_available_vram_gb`, `min_available_ram_gb`
+
 ### Instance Proxy (via solar-control to host)
+
+- `POST /api/hosts/{host_id}/instances` - Create an inference instance
+- `PUT /api/hosts/{host_id}/instances/{instance_id}` - Update instance configuration
+- `DELETE /api/hosts/{host_id}/instances/{instance_id}` - Delete an instance
 
 - `POST /api/hosts/{host_id}/instances/{instance_id}/start` - Start instance
 - `POST /api/hosts/{host_id}/instances/{instance_id}/stop` - Stop instance
@@ -336,6 +349,10 @@ app/
       hosts.py           #   Host management + instance proxy
       endpoints.py       #   API endpoint management
       gateway.py         #   Gateway stats and request history
+      models.py          #   Model availability and distribution
+      resources.py       #   Aggregated cluster resource queries
+  services/              # Shared business logic
+    migration.py         #   Instance migration orchestrator
   socketio_app/
     server.py            # Socket.IO server setup
     host_handlers.py     # /hosts namespace handlers

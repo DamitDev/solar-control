@@ -53,7 +53,11 @@ async def _fetch_host_resource_snapshot(
             1 for i in instances if i.get("status") == "running"
         )
     except Exception:
-        pass
+        logger.warning(
+            "Failed to fetch instances from Redis for host %s",
+            host.id,
+            exc_info=True,
+        )
 
     # Proxy live resource data from the host
     try:
@@ -66,7 +70,9 @@ async def _fetch_host_resource_snapshot(
                 timeout=aiohttp.ClientTimeout(total=_RESOURCE_TIMEOUT),
             ) as resp:
                 if resp.status != 200:
-                    base.error = f"Host returned {resp.status}"
+                    base.error = (
+                        f"Host {host.name} at {host.url} returned HTTP {resp.status}"
+                    )
                     return base
 
                 data = await resp.json()

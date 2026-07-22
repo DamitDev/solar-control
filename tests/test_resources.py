@@ -177,7 +177,7 @@ async def test_fetch_host_resource_snapshot_non_200(mock_host_online):
         snap = await _fetch_host_resource_snapshot(mock_host_online)
 
         assert snap.reachable is False
-        assert "returned 503" in (snap.error or "")
+        assert "HTTP 503" in (snap.error or "")
 
 
 # ── get_resources integration tests ─────────────────────────────────
