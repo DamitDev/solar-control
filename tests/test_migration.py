@@ -17,7 +17,6 @@ from app.services.migration import (
     validate_target_fitness,
 )
 
-
 # ── Helpers ──────────────────────────────────────────────────────
 
 
@@ -77,11 +76,10 @@ def instance_config() -> dict:
 
 @pytest.mark.anyio
 async def test_create_instance_on_host_success(target_host):
-    with patch(
-        "app.services.migration.resolve"
-    ) as mock_resolve, patch(
-        "aiohttp.ClientSession.post"
-    ) as mock_post:
+    with (
+        patch("app.services.migration.resolve") as mock_resolve,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
         mock_resolve.return_value = "repo://test-model:v1"
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -100,18 +98,19 @@ async def test_create_instance_on_host_success(target_host):
 @pytest.mark.anyio
 async def test_create_instance_on_host_invalid_priority(target_host):
     with pytest.raises(HTTPException) as exc:
-        await create_instance_on_host(
-            target_host, {"priority": "invalid"}
-        )
+        await create_instance_on_host(target_host, {"priority": "invalid"})
     assert exc.value.status_code == 422
     assert "Invalid priority" in exc.value.detail
 
 
 @pytest.mark.anyio
 async def test_create_instance_on_host_unreachable(target_host):
-    with patch("app.services.migration.resolve"), patch(
-        "aiohttp.ClientSession.post",
-        side_effect=Exception("Connection refused"),
+    with (
+        patch("app.services.migration.resolve"),
+        patch(
+            "aiohttp.ClientSession.post",
+            side_effect=Exception("Connection refused"),
+        ),
     ):
         with pytest.raises(HTTPException) as exc:
             await create_instance_on_host(target_host, {})
@@ -123,12 +122,8 @@ async def test_create_instance_on_host_unreachable(target_host):
 
 @pytest.mark.anyio
 async def test_capture_config_from_redis(source_host, instance_config):
-    with patch(
-        "app.services.migration.host_store"
-    ) as mock_store:
-        mock_store.get_host_instances = AsyncMock(
-            return_value=[instance_config]
-        )
+    with patch("app.services.migration.host_store") as mock_store:
+        mock_store.get_host_instances = AsyncMock(return_value=[instance_config])
 
         result = await capture_instance_config(source_host, "inst-1")
         assert result["instance_id"] == "inst-1"
@@ -136,11 +131,10 @@ async def test_capture_config_from_redis(source_host, instance_config):
 
 @pytest.mark.anyio
 async def test_capture_config_fallback_http(source_host, instance_config):
-    with patch(
-        "app.services.migration.host_store"
-    ) as mock_store, patch(
-        "aiohttp.ClientSession.get"
-    ) as mock_get:
+    with (
+        patch("app.services.migration.host_store") as mock_store,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
         mock_store.get_host_instances = AsyncMock(return_value=[])
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -153,11 +147,10 @@ async def test_capture_config_fallback_http(source_host, instance_config):
 
 @pytest.mark.anyio
 async def test_capture_config_not_found(source_host):
-    with patch(
-        "app.services.migration.host_store"
-    ) as mock_store, patch(
-        "aiohttp.ClientSession.get"
-    ) as mock_get:
+    with (
+        patch("app.services.migration.host_store") as mock_store,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
         mock_store.get_host_instances = AsyncMock(return_value=[])
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -174,9 +167,7 @@ async def test_capture_config_not_found(source_host):
 
 @pytest.mark.anyio
 async def test_check_one_replica_no_conflict(target_host):
-    with patch(
-        "app.services.migration.host_store"
-    ) as mock_store:
+    with patch("app.services.migration.host_store") as mock_store:
         mock_store.get_host_instances = AsyncMock(
             return_value=[{"config": {"alias": "other-model:v1"}}]
         )
@@ -186,9 +177,7 @@ async def test_check_one_replica_no_conflict(target_host):
 
 @pytest.mark.anyio
 async def test_check_one_replica_conflict(target_host):
-    with patch(
-        "app.services.migration.host_store"
-    ) as mock_store:
+    with patch("app.services.migration.host_store") as mock_store:
         mock_store.get_host_instances = AsyncMock(
             return_value=[{"config": {"alias": "test-model:v1"}}]
         )
@@ -233,9 +222,7 @@ async def test_validate_target_production_allowed(target_host):
     with patch("aiohttp.ClientSession.get") as mock_get:
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(
-            return_value={"disk": {"available_gb": 100.0}}
-        )
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
 
         # Should not raise
@@ -251,15 +238,11 @@ async def test_validate_target_insufficient_disk(target_host):
     with patch("aiohttp.ClientSession.get") as mock_get:
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(
-            return_value={"disk": {"available_gb": 1.0}}
-        )
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 1.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
 
         with pytest.raises(HTTPException) as exc:
-            await validate_target_fitness(
-                target_host, {"priority": "staging"}
-            )
+            await validate_target_fitness(target_host, {"priority": "staging"})
         assert exc.value.status_code == 507
 
 
@@ -300,9 +283,7 @@ async def test_validate_target_gpu_type_match():
     with patch("aiohttp.ClientSession.get") as mock_get:
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(
-            return_value={"disk": {"available_gb": 100.0}}
-        )
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
 
         # Should not raise
@@ -330,9 +311,7 @@ async def test_validate_target_insufficient_vram(target_host):
         mock_get.return_value.__aenter__.return_value = mock_resp
 
         with pytest.raises(HTTPException) as exc:
-            await validate_target_fitness(
-                target_host, {"priority": "staging"}
-            )
+            await validate_target_fitness(target_host, {"priority": "staging"})
         assert exc.value.status_code == 507
         assert "vram" in exc.value.detail.lower()
 
@@ -343,12 +322,8 @@ async def test_validate_target_insufficient_vram(target_host):
 @pytest.mark.anyio
 async def test_ensure_model_on_target_success(target_host):
     mock_pull = AsyncMock(return_value=("/models/repo--test--v1", True))
-    with patch(
-        "app.routes.management.models._pull_on_host", mock_pull
-    ):
-        path, cached = await ensure_model_on_target(
-            target_host, "repo://test-model:v1"
-        )
+    with patch("app.routes.management.models._pull_on_host", mock_pull):
+        path, cached = await ensure_model_on_target(target_host, "repo://test-model:v1")
         assert path == "/models/repo--test--v1"
         assert cached is True
 
@@ -365,9 +340,7 @@ async def test_ensure_model_on_target_failure(target_host):
             status_code=404,
         )
     )
-    with patch(
-        "app.routes.management.models._pull_on_host", mock_pull
-    ):
+    with patch("app.routes.management.models._pull_on_host", mock_pull):
         with pytest.raises(HTTPException) as exc:
             await ensure_model_on_target(target_host, "repo://bad:v1")
         assert exc.value.status_code == 404
@@ -403,48 +376,36 @@ async def test_stop_source_instance_unreachable(source_host):
 
 
 @pytest.mark.anyio
-async def test_migrate_happy_path(
-    source_host, target_host, instance_config
-):
+async def test_migrate_happy_path(source_host, target_host, instance_config):
     """Full happy-path migration: all steps succeed."""
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db, patch(
-        "app.services.migration.host_store"
-    ) as mock_store, patch(
-        "app.services.migration.check_no_active_training"
-    ) as mock_train_check, patch(
-        "app.services.migration.ensure_model_on_target"
-    ) as mock_ensure, patch(
-        "app.services.migration.stop_source_instance"
-    ) as mock_stop, patch(
-        "app.services.migration.create_instance_on_host"
-    ) as mock_create, patch(
-        "aiohttp.ClientSession.get"
-    ) as mock_get:
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+        patch("app.services.migration.ensure_model_on_target") as mock_ensure,
+        patch("app.services.migration.stop_source_instance") as mock_stop,
+        patch("app.services.migration.create_instance_on_host") as mock_create,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
         # DB: both hosts exist
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else target_host
-            if hid == "host-tgt"
-            else None
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
         )
 
         # Redis: source has the instance, target has no conflicts
         mock_store.get_host_instances = AsyncMock(
-            side_effect=lambda hid: [instance_config]
-            if hid == "host-src"
-            else []
+            side_effect=lambda hid: [instance_config] if hid == "host-src" else []
         )
         mock_train_check.return_value = None
 
         # Disk check passes
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(
-            return_value={"disk": {"available_gb": 100.0}}
-        )
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
 
         mock_ensure.return_value = (
@@ -478,9 +439,7 @@ async def test_migrate_happy_path(
 
 @pytest.mark.anyio
 async def test_migrate_source_host_not_found(target_host):
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db:
+    with patch("app.services.migration.host_db") as mock_db:
         mock_db.get_host = AsyncMock(return_value=None)
 
         with pytest.raises(HTTPException) as exc:
@@ -495,13 +454,9 @@ async def test_migrate_source_host_not_found(target_host):
 
 @pytest.mark.anyio
 async def test_migrate_target_host_not_found(source_host):
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db:
+    with patch("app.services.migration.host_db") as mock_db:
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else None
+            side_effect=lambda hid: source_host if hid == "host-src" else None
         )
 
         with pytest.raises(HTTPException) as exc:
@@ -517,9 +472,7 @@ async def test_migrate_target_host_not_found(source_host):
 @pytest.mark.anyio
 async def test_migrate_same_host_rejected(source_host):
     """Same source and target host is rejected with 422."""
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db:
+    with patch("app.services.migration.host_db") as mock_db:
         mock_db.get_host = AsyncMock(return_value=source_host)
 
         with pytest.raises(HTTPException) as exc:
@@ -533,40 +486,35 @@ async def test_migrate_same_host_rejected(source_host):
 
 
 @pytest.mark.anyio
-async def test_migrate_alias_conflict(
-    source_host, target_host, instance_config
-):
+async def test_migrate_alias_conflict(source_host, target_host, instance_config):
     """Target host already runs an instance with the same alias."""
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db, patch(
-        "app.services.migration.host_store"
-    ) as mock_store, patch(
-        "app.services.migration.check_no_active_training"
-    ) as mock_train_check, patch(
-        "aiohttp.ClientSession.get"
-    ) as mock_get:
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else target_host
-            if hid == "host-tgt"
-            else None
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
         )
 
         # Source: instance exists; Target: already has conflict
         mock_store.get_host_instances = AsyncMock(
-            side_effect=lambda hid: [instance_config]
-            if hid == "host-src"
-            else [{"config": {"alias": "test-model:v1"}}]
+            side_effect=lambda hid: (
+                [instance_config]
+                if hid == "host-src"
+                else [{"config": {"alias": "test-model:v1"}}]
+            )
         )
         mock_train_check.return_value = None
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(
-            return_value={"disk": {"available_gb": 100.0}}
-        )
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
 
         with pytest.raises(HTTPException) as exc:
@@ -579,9 +527,7 @@ async def test_migrate_alias_conflict(
 
 
 @pytest.mark.anyio
-async def test_migrate_production_refused(
-    source_host, target_host
-):
+async def test_migrate_production_refused(source_host, target_host):
     """Production instance migration refused without allow_production."""
     prod_config = {
         "instance_id": "inst-prod",
@@ -593,23 +539,19 @@ async def test_migrate_production_refused(
         },
     }
 
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db, patch(
-        "app.services.migration.host_store"
-    ) as mock_store, patch(
-        "app.services.migration.check_no_active_training"
-    ) as mock_train_check:
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+    ):
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else target_host
-            if hid == "host-tgt"
-            else None
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
         )
-        mock_store.get_host_instances = AsyncMock(
-            return_value=[prod_config]
-        )
+        mock_store.get_host_instances = AsyncMock(return_value=[prod_config])
         mock_train_check.return_value = None
 
         with pytest.raises(HTTPException) as exc:
@@ -624,40 +566,30 @@ async def test_migrate_production_refused(
 
 
 @pytest.mark.anyio
-async def test_migrate_model_pull_fails(
-    source_host, target_host, instance_config
-):
-    """Model pull on target host fails."""
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db, patch(
-        "app.services.migration.host_store"
-    ) as mock_store, patch(
-        "app.services.migration.check_no_active_training"
-    ) as mock_train_check, patch(
-        "app.services.migration.ensure_model_on_target"
-    ) as mock_ensure, patch(
-        "aiohttp.ClientSession.get"
-    ) as mock_get:
+async def test_migrate_model_pull_fails(source_host, target_host, instance_config):
+    """Model pull on target host fails — returns failed MigrationResult."""
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+        patch("app.services.migration.ensure_model_on_target") as mock_ensure,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else target_host
-            if hid == "host-tgt"
-            else None
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
         )
         mock_store.get_host_instances = AsyncMock(
-            side_effect=lambda hid: [instance_config]
-            if hid == "host-src"
-            else []
+            side_effect=lambda hid: [instance_config] if hid == "host-src" else []
         )
         mock_train_check.return_value = None
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(
-            return_value={"disk": {"available_gb": 100.0}}
-        )
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
 
         mock_ensure.side_effect = HTTPException(
@@ -665,54 +597,55 @@ async def test_migrate_model_pull_fails(
             detail="Artifact not found",
         )
 
-        with pytest.raises(HTTPException) as exc:
-            await execute_migration(
-                instance_id="inst-1",
-                source_host_id="host-src",
-                target_host_id="host-tgt",
-            )
-        assert exc.value.status_code == 404
+        result = await execute_migration(
+            instance_id="inst-1",
+            source_host_id="host-src",
+            target_host_id="host-tgt",
+        )
+
+        assert isinstance(result, MigrationResult)
+        assert result.status == "failed"
+        assert result.error is not None
+        assert "Ensure model failed" in result.error
+        step_statuses = {s.step: s.status for s in result.steps}
+        assert step_statuses.get("ensure_model") == "failed"
+        # Steps 1–4 should be ok, step 5 failed, steps 6–7 not reached
+        assert step_statuses.get("validate_hosts") == "ok"
+        assert step_statuses.get("check_training_jobs") == "ok"
+        assert step_statuses.get("capture_config") == "ok"
+        assert step_statuses.get("validate_target") == "ok"
+        assert step_statuses.get("check_anti_affinity") == "ok"
+        assert "stop_source" not in step_statuses
+        assert "create_target" not in step_statuses
 
 
 @pytest.mark.anyio
-async def test_migrate_create_target_fails(
-    source_host, target_host, instance_config
-):
+async def test_migrate_create_target_fails(source_host, target_host, instance_config):
     """Target creation fails after source is stopped — partial result returned."""
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db, patch(
-        "app.services.migration.host_store"
-    ) as mock_store, patch(
-        "app.services.migration.check_no_active_training"
-    ) as mock_train_check, patch(
-        "app.services.migration.ensure_model_on_target"
-    ) as mock_ensure, patch(
-        "app.services.migration.stop_source_instance"
-    ) as mock_stop, patch(
-        "app.services.migration.create_instance_on_host"
-    ) as mock_create, patch(
-        "aiohttp.ClientSession.get"
-    ) as mock_get:
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+        patch("app.services.migration.ensure_model_on_target") as mock_ensure,
+        patch("app.services.migration.stop_source_instance") as mock_stop,
+        patch("app.services.migration.create_instance_on_host") as mock_create,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else target_host
-            if hid == "host-tgt"
-            else None
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
         )
         mock_store.get_host_instances = AsyncMock(
-            side_effect=lambda hid: [instance_config]
-            if hid == "host-src"
-            else []
+            side_effect=lambda hid: [instance_config] if hid == "host-src" else []
         )
         mock_train_check.return_value = None
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(
-            return_value={"disk": {"available_gb": 100.0}}
-        )
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
 
         mock_ensure.return_value = (
@@ -744,17 +677,16 @@ async def test_migrate_rejected_source_has_training_jobs(
     source_host, target_host, instance_config
 ):
     """Migration is rejected when source host has active training jobs."""
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db, patch(
-        "app.services.migration.check_no_active_training"
-    ) as mock_check:
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.check_no_active_training") as mock_check,
+    ):
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else target_host
-            if hid == "host-tgt"
-            else None
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
         )
 
         mock_check.side_effect = HTTPException(
@@ -776,9 +708,7 @@ async def test_migrate_rejected_source_has_training_jobs(
 
 
 @pytest.mark.anyio
-async def test_migrate_invalid_priority_in_captured_config(
-    source_host, target_host
-):
+async def test_migrate_invalid_priority_in_captured_config(source_host, target_host):
     """Migration fails early when captured config has an invalid priority.
 
     This prevents the bug where a legacy instance with priority='dev'
@@ -794,23 +724,19 @@ async def test_migrate_invalid_priority_in_captured_config(
         },
     }
 
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db, patch(
-        "app.services.migration.host_store"
-    ) as mock_store, patch(
-        "app.services.migration.check_no_active_training"
-    ) as mock_train_check:
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+    ):
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else target_host
-            if hid == "host-tgt"
-            else None
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
         )
-        mock_store.get_host_instances = AsyncMock(
-            return_value=[invalid_config]
-        )
+        mock_store.get_host_instances = AsyncMock(return_value=[invalid_config])
         mock_train_check.return_value = None
 
         with pytest.raises(HTTPException) as exc:
@@ -829,21 +755,18 @@ async def test_training_check_unreachable_rejected(
     source_host, target_host, instance_config
 ):
     """Migration is rejected when source host is unreachable for training check."""
-    with patch(
-        "app.services.migration.host_db"
-    ) as mock_db, patch(
-        "app.services.migration.host_store"
-    ) as mock_store:
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+    ):
         mock_db.get_host = AsyncMock(
-            side_effect=lambda hid: source_host
-            if hid == "host-src"
-            else target_host
-            if hid == "host-tgt"
-            else None
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
         )
-        mock_store.get_host_instances = AsyncMock(
-            return_value=[instance_config]
-        )
+        mock_store.get_host_instances = AsyncMock(return_value=[instance_config])
 
         # Simulate the training job check hitting a connection error.
         # The real check_no_active_training now raises HTTPException(502)

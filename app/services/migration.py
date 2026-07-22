@@ -184,9 +184,7 @@ async def capture_instance_config(
     )
 
 
-async def check_one_replica_per_host(
-    target_host: Host, alias: str
-) -> None:
+async def check_one_replica_per_host(target_host: Host, alias: str) -> None:
     """Ensure no instance with the same *alias* exists on *target_host*.
 
     Raises ``HTTPException(409)`` if a conflict is found.
@@ -263,9 +261,7 @@ async def validate_target_fitness(
     try:
         async with aiohttp.ClientSession() as session:
             url = f"{target_host.url.rstrip('/')}/health"
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
 
@@ -286,7 +282,10 @@ async def validate_target_fitness(
                     for mem in memory_list:
                         if mem.get("memory_type") == "VRAM":
                             vram_available = mem.get("available_gb")
-                            if vram_available is not None and vram_available < MIN_VRAM_GB:
+                            if (
+                                vram_available is not None
+                                and vram_available < MIN_VRAM_GB
+                            ):
                                 raise HTTPException(
                                     status_code=507,
                                     detail=(
@@ -419,9 +418,7 @@ async def check_no_active_training(host: Host) -> None:
         )
 
 
-async def stop_source_instance(
-    source_host: Host, instance_id: str
-) -> dict[str, Any]:
+async def stop_source_instance(source_host: Host, instance_id: str) -> dict[str, Any]:
     """Stop *instance_id* on *source_host*.
 
     Returns the host response on success. Raises ``HTTPException`` on
@@ -442,9 +439,7 @@ async def stop_source_instance(
                 if response.status == 200:
                     return await response.json()
                 text = await response.text()
-                raise HTTPException(
-                    status_code=response.status, detail=text
-                )
+                raise HTTPException(status_code=response.status, detail=text)
     except HTTPException:
         raise
     except (
@@ -600,7 +595,9 @@ async def execute_migration(
 
     # ── 3. Validate target fitness ──────────────────────────────
     await validate_target_fitness(
-        target_host, instance_config, allow_production=allow_production,
+        target_host,
+        instance_config,
+        allow_production=allow_production,
         source_gpu_type=source_gpu_type,
     )
     steps.append(MigrationStep(step="validate_target", status="ok"))
@@ -610,14 +607,36 @@ async def execute_migration(
     steps.append(MigrationStep(step="check_anti_affinity", status="ok"))
 
     # ── 5. Ensure model on target ───────────────────────────────
-    path, cached = await ensure_model_on_target(target_host, model_source)
-    steps.append(
-        MigrationStep(
-            step="ensure_model",
-            status="ok",
-            detail={"path": path, "cached": cached},
+    try:
+        path, cached = await ensure_model_on_target(target_host, model_source)
+        steps.append(
+            MigrationStep(
+                step="ensure_model",
+                status="ok",
+                detail={"path": path, "cached": cached},
+            )
         )
-    )
+    except HTTPException as e:
+        steps.append(
+            MigrationStep(
+                step="ensure_model",
+                status="failed",
+                detail={"error": str(e.detail), "status_code": e.status_code},
+            )
+        )
+        return _build_result(
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            None,
+            steps,
+            status="failed",
+            error=f"Ensure model failed: {e.detail}",
+        )
 
     # ── 6. Stop source instance ─────────────────────────────────
     try:
@@ -632,8 +651,15 @@ async def execute_migration(
             )
         )
         return _build_result(
-            migration_id, source_host, target_host, instance_id,
-            alias, model_source, priority, None, steps,
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            None,
+            steps,
             status="failed",
             error=f"Stop source failed: {e.detail}",
         )
@@ -644,9 +670,7 @@ async def execute_migration(
 
     # Remove host/port/api_key — these are host-assigned.
     create_payload: dict[str, Any] = {
-        k: v
-        for k, v in config.items()
-        if k not in ("host", "port", "api_key")
+        k: v for k, v in config.items() if k not in ("host", "port", "api_key")
     }
     # Ensure key fields from captured config are present.
     for key in ("alias", "model_source", "priority", "backend_type"):
@@ -657,9 +681,7 @@ async def execute_migration(
 
     target_instance: dict[str, Any]
     try:
-        target_instance = await create_instance_on_host(
-            target_host, create_payload
-        )
+        target_instance = await create_instance_on_host(target_host, create_payload)
     except HTTPException as e:
         steps.append(
             MigrationStep(
@@ -669,15 +691,21 @@ async def execute_migration(
             )
         )
         return _build_result(
-            migration_id, source_host, target_host, instance_id,
-            alias, model_source, priority, None, steps,
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            None,
+            steps,
             status="failed",
             error=f"Create target failed: {e.detail}",
         )
 
-    target_instance_id = (
-        target_instance.get("instance_id")
-        or target_instance.get("id", "")
+    target_instance_id = target_instance.get("instance_id") or target_instance.get(
+        "id", ""
     )
     steps.append(
         MigrationStep(
@@ -698,6 +726,13 @@ async def execute_migration(
     )
 
     return _build_result(
-        migration_id, source_host, target_host, instance_id,
-        alias, model_source, priority, target_instance_id, steps,
+        migration_id,
+        source_host,
+        target_host,
+        instance_id,
+        alias,
+        model_source,
+        priority,
+        target_instance_id,
+        steps,
     )
