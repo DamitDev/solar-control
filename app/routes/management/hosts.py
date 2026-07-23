@@ -277,11 +277,21 @@ async def create_instance(host_id: str, instance_data: dict[str, Any]):
     # Validate priority if present (S-036)
     validate_priority(instance_data)
 
-    # Resolve model_source if present
+    # Resolve model_source if present.
+    # The resolved local:// URI is used to set model/model_id so the host can
+    # create the instance.  The original model_source URI (repo://, huggingface://)
+    # is preserved for cross-host operations such as migration (S-037).
     model_source = instance_data.get("model_source")
     if model_source:
         resolved = await resolve(model_source, host.url, host.api_key)
-        instance_data = {**instance_data, "model_source": resolved}
+        # Extract filesystem path from local:// URI
+        if resolved.startswith("local:///"):
+            model_path = resolved[9:]   # absolute: "local:///opt/..." → "/opt/..."
+        elif resolved.startswith("local://"):
+            model_path = resolved[8:]   # relative: "local://path"   → "path"
+        else:
+            model_path = resolved
+        instance_data = {**instance_data, "model": model_path}
 
     try:
         async with aiohttp.ClientSession() as session:
