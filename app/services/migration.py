@@ -572,6 +572,8 @@ async def execute_migration(
     # Validate captured priority before any destructive operations (S-036/S-037).
     # Legacy instances may have invalid priorities that would fail at create_target
     # step (step 7) after the source instance has already been stopped.
+    from app.validation import VALID_PRIORITIES
+
     if priority not in VALID_PRIORITIES:
         raise HTTPException(
             status_code=422,
