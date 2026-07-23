@@ -286,9 +286,9 @@ async def create_instance(host_id: str, instance_data: dict[str, Any]):
         resolved = await resolve(model_source, host.url, host.api_key)
         # Extract filesystem path from local:// URI
         if resolved.startswith("local:///"):
-            model_path = resolved[9:]   # absolute: "local:///opt/..." → "/opt/..."
+            model_path = resolved[9:]  # absolute: "local:///opt/..." → "/opt/..."
         elif resolved.startswith("local://"):
-            model_path = resolved[8:]   # relative: "local://path"   → "path"
+            model_path = resolved[8:]  # relative: "local://path"   → "path"
         else:
             model_path = resolved
         backend_type = instance_data.get("backend_type", "llamacpp")
