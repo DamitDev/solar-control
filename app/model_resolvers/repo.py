@@ -26,8 +26,6 @@ _HOST_PULL_TIMEOUT_S = 300
 
 def to_local_uri(path: str) -> str:
     """Convert an absolute or relative host path into a ``local://`` URI."""
-    if path.startswith("/"):
-        return f"local:///{path.lstrip('/')}"
     return f"local://{path}"
 
 
