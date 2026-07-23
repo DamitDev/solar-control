@@ -291,7 +291,11 @@ async def create_instance(host_id: str, instance_data: dict[str, Any]):
             model_path = resolved[8:]   # relative: "local://path"   → "path"
         else:
             model_path = resolved
-        instance_data = {**instance_data, "model": model_path}
+        backend_type = instance_data.get("backend_type", "llamacpp")
+        if backend_type.startswith("huggingface"):
+            instance_data = {**instance_data, "model_id": model_path}
+        else:
+            instance_data = {**instance_data, "model": model_path}
 
     try:
         async with aiohttp.ClientSession() as session:
