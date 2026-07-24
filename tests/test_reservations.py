@@ -89,21 +89,13 @@ def _snap(
 async def test_reserve_happy_path(host_gpu, reservation_request):
     """Simple reservation succeeds when capacity is available."""
     with (
-        patch(
-            "app.services.reservation.host_db"
-        ) as mock_db,
+        patch("app.services.reservation.host_db") as mock_db,
         patch(
             "app.routes.management.resources._fetch_host_resource_snapshot"
         ) as mock_fetch,
-        patch(
-            "app.services.reservation._call_host_reserve"
-        ) as mock_reserve,
-        patch(
-            "app.services.reservation._store_reservation"
-        ) as mock_store,
-        patch(
-            "app.services.placement.host_store"
-        ) as mock_host_store,
+        patch("app.services.reservation._call_host_reserve") as mock_reserve,
+        patch("app.services.reservation._store_reservation") as mock_store,
+        patch("app.services.placement.host_store") as mock_host_store,
     ):
         mock_db.get_all_hosts = AsyncMock(return_value=[host_gpu])
         mock_fetch.return_value = _snap(host_gpu)
@@ -147,20 +139,14 @@ async def test_reserve_no_hosts():
 
 
 @pytest.mark.anyio
-async def test_reserve_insufficient_capacity(
-    host_gpu, reservation_request
-):
+async def test_reserve_insufficient_capacity(host_gpu, reservation_request):
     """Host exists but doesn't have enough VRAM."""
     with (
-        patch(
-            "app.services.reservation.host_db"
-        ) as mock_db,
+        patch("app.services.reservation.host_db") as mock_db,
         patch(
             "app.routes.management.resources._fetch_host_resource_snapshot"
         ) as mock_fetch,
-        patch(
-            "app.services.placement.host_store"
-        ) as mock_host_store,
+        patch("app.services.placement.host_store") as mock_host_store,
     ):
         mock_db.get_all_hosts = AsyncMock(return_value=[host_gpu])
         mock_fetch.return_value = _snap(host_gpu, vram_avail=5.0)
@@ -176,35 +162,21 @@ async def test_reserve_insufficient_capacity(
 
 
 @pytest.mark.anyio
-async def test_reserve_with_migration(
-    host_gpu, host_gpu2, reservation_request
-):
+async def test_reserve_with_migration(host_gpu, host_gpu2, reservation_request):
     """When no host has capacity, migration frees capacity."""
     with (
-        patch(
-            "app.services.reservation.host_db"
-        ) as mock_db,
+        patch("app.services.reservation.host_db") as mock_db,
         patch(
             "app.routes.management.resources._fetch_host_resource_snapshot"
         ) as mock_fetch,
-        patch(
-            "app.services.reservation._call_host_reserve"
-        ) as mock_reserve,
-        patch(
-            "app.services.reservation._store_reservation"
-        ) as mock_store,
-        patch(
-            "app.services.placement.host_store"
-        ) as mock_host_store,
-        patch(
-            "app.services.reservation.execute_migration"
-        ) as mock_migrate,
+        patch("app.services.reservation._call_host_reserve") as mock_reserve,
+        patch("app.services.reservation._store_reservation") as mock_store,
+        patch("app.services.placement.host_store") as mock_host_store,
+        patch("app.services.reservation.execute_migration") as mock_migrate,
     ):
         # Both hosts have low VRAM initially — triggers migration path
         # host_gpu2 has VRAM for displaced instance but not enough RAM for the request
-        mock_db.get_all_hosts = AsyncMock(
-            return_value=[host_gpu, host_gpu2]
-        )
+        mock_db.get_all_hosts = AsyncMock(return_value=[host_gpu, host_gpu2])
         mock_fetch.side_effect = [
             _snap(host_gpu, vram_avail=5.0, ram_avail=10.0),
             _snap(host_gpu2, vram_avail=30.0, ram_avail=10.0),
@@ -224,6 +196,7 @@ async def test_reserve_with_migration(
         )
 
         from app.models.migration import MigrationResult
+
         mock_migrate.return_value = MigrationResult(
             migration_id="mig-1",
             status="completed",
@@ -256,16 +229,10 @@ async def test_reserve_with_migration(
 async def test_release_reservation_success(host_gpu):
     """Release finds the reservation and proxies to the host."""
     with (
-        patch(
-            "app.services.reservation._get_reservation"
-        ) as mock_get,
+        patch("app.services.reservation._get_reservation") as mock_get,
         patch("app.services.reservation.host_db") as mock_db,
-        patch(
-            "app.services.reservation._call_host_release"
-        ) as mock_release,
-        patch(
-            "app.services.reservation._remove_reservation"
-        ) as mock_remove,
+        patch("app.services.reservation._call_host_release") as mock_release,
+        patch("app.services.reservation._remove_reservation") as mock_remove,
     ):
         mock_get.return_value = {
             "reservation_id": "res-1",
@@ -298,9 +265,7 @@ async def test_release_not_found():
 async def test_release_host_not_found():
     """Release when host no longer exists returns 404."""
     with (
-        patch(
-            "app.services.reservation._get_reservation"
-        ) as mock_get,
+        patch("app.services.reservation._get_reservation") as mock_get,
         patch("app.services.reservation.host_db") as mock_db,
     ):
         mock_get.return_value = {
@@ -349,25 +314,15 @@ async def test_reserve_gpu_type_filter(reservation_request):
     )
 
     with (
-        patch(
-            "app.services.reservation.host_db"
-        ) as mock_db,
+        patch("app.services.reservation.host_db") as mock_db,
         patch(
             "app.routes.management.resources._fetch_host_resource_snapshot"
         ) as mock_fetch,
-        patch(
-            "app.services.reservation._call_host_reserve"
-        ) as mock_reserve,
-        patch(
-            "app.services.reservation._store_reservation"
-        ) as mock_store,
-        patch(
-            "app.services.placement.host_store"
-        ) as mock_host_store,
+        patch("app.services.reservation._call_host_reserve") as mock_reserve,
+        patch("app.services.reservation._store_reservation") as mock_store,
+        patch("app.services.placement.host_store") as mock_host_store,
     ):
-        mock_db.get_all_hosts = AsyncMock(
-            return_value=[host_cuda, host_mps]
-        )
+        mock_db.get_all_hosts = AsyncMock(return_value=[host_cuda, host_mps])
         mock_fetch.side_effect = [
             _snap(host_cuda),
             _snap(host_mps),

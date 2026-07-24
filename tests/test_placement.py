@@ -270,9 +270,7 @@ async def test_find_candidates_alias_conflict(host_a100, host_mps):
         # A100 already runs the alias
         mock_store.get_host_instances = AsyncMock(
             side_effect=lambda hid: (
-                [{"config": {"alias": "test-model:v1"}}]
-                if hid == "h-a100"
-                else []
+                [{"config": {"alias": "test-model:v1"}}] if hid == "h-a100" else []
             )
         )
 

@@ -28,7 +28,6 @@ from app.models.reservation import (
 )
 from app.redis_state.connection import redis_client
 from app.services.placement import (
-    can_displace,
     find_candidates,
     find_displaceable_instances,
     fits_resources,
@@ -105,10 +104,7 @@ async def _call_host_release(
     """Proxy reservation release to Solar Host (S-034 DELETE /resources/reservations/{id})."""
     try:
         async with aiohttp.ClientSession() as session:
-            url = (
-                f"{host.url.rstrip('/')}/resources/reservations/"
-                f"{host_reservation_id}"
-            )
+            url = f"{host.url.rstrip('/')}/resources/reservations/{host_reservation_id}"
             headers = {"X-API-Key": host.api_key}
             async with session.delete(
                 url,
@@ -212,9 +208,7 @@ async def reserve_resources(
     snapshots_list: list[HostResourceSnapshot] = await asyncio.gather(
         *[_fetch_host_resource_snapshot(h) for h in hosts]
     )
-    snapshots: dict[str, HostResourceSnapshot] = {
-        s.host_id: s for s in snapshots_list
-    }
+    snapshots: dict[str, HostResourceSnapshot] = {s.host_id: s for s in snapshots_list}
 
     # ── 3. Find candidates ──────────────────────────────────────
     candidates = await find_candidates(
@@ -262,13 +256,8 @@ async def reserve_resources(
 
             # Try migrating the lowest-priority displaceable instance
             for inst in displaceable:
-                inst_id = (
-                    inst.get("instance_id") or inst.get("id", "")
-                )
-                inst_alias = (
-                    inst.get("config", inst).get("alias")
-                    or inst.get("alias")
-                )
+                inst_id = inst.get("instance_id") or inst.get("id", "")
+                inst_alias = inst.get("config", inst).get("alias") or inst.get("alias")
                 if not inst_id:
                     continue
 
@@ -282,9 +271,7 @@ async def reserve_resources(
 
                     # Check if other host can take this instance
                     inst_vram = float(inst.get("vram_gb", 0) or 0)
-                    if fits_resources(
-                        other_snap, inst_vram, None, None
-                    ):
+                    if fits_resources(other_snap, inst_vram, None, None):
                         migration_evaluated += 1
                         try:
                             mig_result = await execute_migration(
@@ -306,11 +293,9 @@ async def reserve_resources(
 
                             if mig_result.status == "completed":
                                 # Re-fetch snapshot for source host
-                                snapshots[host.id] = (
-                                    await _fetch_host_resource_snapshot(
-                                        host
-                                    )
-                                )
+                                snapshots[
+                                    host.id
+                                ] = await _fetch_host_resource_snapshot(host)
                                 # Check if this host now fits
                                 if fits_resources(
                                     snapshots[host.id],
@@ -348,11 +333,7 @@ async def reserve_resources(
                     detail=(
                         f"No host with sufficient capacity for "
                         f"{request.vram_gb} GB VRAM"
-                        + (
-                            f" ({request.ram_gb} GB RAM)"
-                            if request.ram_gb
-                            else ""
-                        )
+                        + (f" ({request.ram_gb} GB RAM)" if request.ram_gb else "")
                         + (
                             f" across {len(hosts)} hosts. "
                             f"Evaluated {migration_evaluated} migration "
@@ -380,9 +361,7 @@ async def reserve_resources(
         )
 
     host_result = await _call_host_reserve(target_host, request)
-    host_reservation_id = (
-        host_result.get("reservation_id") or host_result.get("id", "")
-    )
+    host_reservation_id = host_result.get("reservation_id") or host_result.get("id", "")
 
     # ── 6. Store tracking metadata ──────────────────────────────
     await _store_reservation(
@@ -426,10 +405,7 @@ async def release_reservation(
     if not host:
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"Host '{host_id}' not found for "
-                f"reservation '{reservation_id}'"
-            ),
+            detail=(f"Host '{host_id}' not found for reservation '{reservation_id}'"),
         )
 
     host_reservation_id = reservation["host_reservation_id"]
@@ -443,10 +419,7 @@ async def release_reservation(
             host_reservation_id=host_reservation_id,
             host_id=host_id,
             released=True,
-            message=(
-                f"Reservation '{reservation_id}' released "
-                f"on host '{host.name}'"
-            ),
+            message=(f"Reservation '{reservation_id}' released on host '{host.name}'"),
         )
     except HTTPException:
         # Still remove from tracking even if host release failed

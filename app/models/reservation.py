@@ -87,9 +87,7 @@ class ReservationResponse(BaseModel):
     )
     migrated: bool = Field(
         default=False,
-        description=(
-            "Whether lower-priority workloads were migrated to free capacity"
-        ),
+        description=("Whether lower-priority workloads were migrated to free capacity"),
     )
     migrations: list[dict[str, Any]] = Field(
         default_factory=list,

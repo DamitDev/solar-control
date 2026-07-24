@@ -108,8 +108,7 @@ async def find_candidates(
         if exclude_alias is not None:
             instances = await host_store.get_host_instances(host.id)
             conflict = any(
-                (i.get("config", i).get("alias") == exclude_alias)
-                for i in instances
+                (i.get("config", i).get("alias") == exclude_alias) for i in instances
             )
             if conflict:
                 continue
@@ -186,8 +185,6 @@ async def find_displaceable_instances(
             displaceable.append(inst)
 
     # Sort by lowest priority first (ephemeral before staging)
-    displaceable.sort(
-        key=lambda i: PRIORITY_ORDER.get(i.get("_priority", ""), 99)
-    )
+    displaceable.sort(key=lambda i: PRIORITY_ORDER.get(i.get("_priority", ""), 99))
 
     return displaceable
