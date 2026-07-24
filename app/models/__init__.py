@@ -29,6 +29,13 @@ from .openai import (
     RerankResult as RerankResult,
     StreamOptions as StreamOptions,
 )
+from .reservation import (
+    MigrationCandidate as MigrationCandidate,
+    ReservationFailure as ReservationFailure,
+    ReservationReleaseResponse as ReservationReleaseResponse,
+    ReservationRequest as ReservationRequest,
+    ReservationResponse as ReservationResponse,
+)
 from .socketio import (
     HostHealthPayload as HostHealthPayload,
     HostPendingPayload as HostPendingPayload,
