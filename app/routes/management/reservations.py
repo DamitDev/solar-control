@@ -61,7 +61,7 @@ async def cancel_reservation(
 ) -> ReservationReleaseResponse:
     """Release a previously created reservation.
 
-    Proxies DELETE /resources/reserve/{id} to the Solar Host
+    Proxies DELETE /resources/reservations/{id} to the Solar Host
     and removes the reservation from Solar Control tracking.
     """
     return await release_reservation(reservation_id)

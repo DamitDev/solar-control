@@ -45,25 +45,24 @@ async def _call_host_reserve(
     host: Host,
     request: ReservationRequest,
 ) -> dict[str, Any]:
-    """Proxy a reservation request to a Solar Host (S-034 POST /resources/reserve)."""
+    """Proxy a reservation request to a Solar Host (S-034 POST /resources/reservations)."""
     payload: dict[str, Any] = {
         "vram_gb": request.vram_gb,
+        "ram_gb": request.ram_gb or 0.0,
         "job_id": request.job_id,
         "workload_type": request.workload_type,
         "requester": request.requester,
     }
-    if request.ram_gb is not None:
-        payload["ram_gb"] = request.ram_gb
     if request.disk_gb is not None:
         payload["disk_gb"] = request.disk_gb
     if request.ttl_seconds is not None:
         payload["ttl_seconds"] = request.ttl_seconds
     if request.expiration is not None:
-        payload["expiration"] = request.expiration
+        payload["expires_at"] = request.expiration
 
     try:
         async with aiohttp.ClientSession() as session:
-            url = f"{host.url.rstrip('/')}/resources/reserve"
+            url = f"{host.url.rstrip('/')}/resources/reservations"
             headers = {
                 "X-API-Key": host.api_key,
                 "Content-Type": "application/json",
@@ -103,11 +102,11 @@ async def _call_host_release(
     host: Host,
     host_reservation_id: str,
 ) -> dict[str, Any]:
-    """Proxy reservation release to Solar Host (S-034 DELETE /resources/reserve/{id})."""
+    """Proxy reservation release to Solar Host (S-034 DELETE /resources/reservations/{id})."""
     try:
         async with aiohttp.ClientSession() as session:
             url = (
-                f"{host.url.rstrip('/')}/resources/reserve/"
+                f"{host.url.rstrip('/')}/resources/reservations/"
                 f"{host_reservation_id}"
             )
             headers = {"X-API-Key": host.api_key}
@@ -401,7 +400,7 @@ async def reserve_resources(
         disk_gb=request.disk_gb,
         workload_type=request.workload_type,
         priority=request.priority,
-        expiration=host_result.get("expiration"),
+        expiration=host_result.get("expires_at"),
         migrated=bool(migration_details),
         migrations=migration_details,
     )
@@ -413,7 +412,7 @@ async def release_reservation(
     """Release a reservation by ID, proxying to the host.
 
     Looks up the reservation tracking data in Redis, then calls
-    DELETE /resources/reserve/{id} on the target host.
+    DELETE /resources/reservations/{id} on the target host.
     """
     reservation = await _get_reservation(reservation_id)
     if not reservation:
