@@ -12,7 +12,6 @@ from app.models.reservation import (
 )
 from app.services.reservation import reserve_resources, release_reservation
 
-
 # ── Fixtures ────────────────────────────────────────────────────
 
 

@@ -293,9 +293,9 @@ async def reserve_resources(
 
                             if mig_result.status == "completed":
                                 # Re-fetch snapshot for source host
-                                snapshots[
-                                    host.id
-                                ] = await _fetch_host_resource_snapshot(host)
+                                snapshots[host.id] = (
+                                    await _fetch_host_resource_snapshot(host)
+                                )
                                 # Check if this host now fits
                                 if fits_resources(
                                     snapshots[host.id],

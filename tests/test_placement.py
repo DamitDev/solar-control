@@ -11,7 +11,6 @@ from app.services.placement import (
     fits_resources,
 )
 
-
 # ── Fixtures ────────────────────────────────────────────────────
 
 
