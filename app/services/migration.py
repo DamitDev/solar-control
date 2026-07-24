@@ -115,13 +115,16 @@ async def capture_instance_config(
     """Retrieve the full instance configuration from *source_host*.
 
     Tries Redis cache first (fast path), then falls back to an HTTP
-    ``GET /instances`` call to the host.
+    ``GET /instances`` call to the host.  The Redis cache only
+    short-circuits when the entry includes a ``config`` key (i.e. a
+    full dump from a prior HTTP call); the flat WebSocket notification
+    format omits most config fields and is not used as a shortcut.
     """
-    # Fast path: Redis instance cache
+    # Fast path: full config in Redis cache?
     instances = await host_store.get_host_instances(source_host.id)
     for inst in instances:
         iid = inst.get("instance_id") or inst.get("id")
-        if iid == instance_id:
+        if iid == instance_id and "config" in inst:
             logger.debug(
                 "Instance config for %s/%s found in Redis cache",
                 source_host.name,
@@ -129,7 +132,7 @@ async def capture_instance_config(
             )
             return inst
 
-    # Fallback: fetch from source host via HTTP
+    # Fallback / direct: fetch from source host via HTTP
     logger.info(
         "Instance %s not in Redis cache for host %s, falling back to HTTP",
         instance_id,
