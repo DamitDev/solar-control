@@ -672,12 +672,36 @@ async def execute_migration(
     # Build the instance config for the target host.
     config = instance_config.get("config", instance_config)
 
-    # Remove host/port/api_key — these are host-assigned.
+    # Remove host-assigned and instance-level fields from the config dict.
+    _INSTANCE_FIELDS = frozenset(
+        {
+            "id",
+            "status",
+            "port",
+            "pid",
+            "api_key",
+            "supported_endpoints",
+            "managed_by",
+            "intent_id",
+            "created_at",
+            "started_at",
+            "error_message",
+            "retry_count",
+            "busy",
+            "prefill_progress",
+            "active_slots",
+        }
+    )
     create_payload: dict[str, Any] = {
-        k: v for k, v in config.items() if k not in ("host", "port", "api_key")
+        k: v for k, v in config.items() if k not in _INSTANCE_FIELDS
     }
+    # Set model to the path resolved by ensure_model_on_target so the
+    # host does not need to resolve model_source itself (which would
+    # reject repo:// URIs without the companion host-side fix).
+    create_payload["model"] = path
+    create_payload.pop("model_source", None)
     # Ensure key fields from captured config are present.
-    for key in ("alias", "model_source", "priority", "backend_type"):
+    for key in ("alias", "priority", "backend_type"):
         if key not in create_payload:
             val = _config_field(instance_config, key)
             if val is not None:
@@ -685,7 +709,9 @@ async def execute_migration(
 
     target_instance: dict[str, Any]
     try:
-        target_instance = await create_instance_on_host(target_host, create_payload)
+        target_instance = await create_instance_on_host(
+            target_host, {"config": create_payload}
+        )
     except HTTPException as e:
         steps.append(
             MigrationStep(
