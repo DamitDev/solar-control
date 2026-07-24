@@ -248,7 +248,7 @@ async def test_validate_target_insufficient_disk(target_host):
 
 @pytest.mark.anyio
 async def test_validate_target_gpu_type_mismatch():
-    """Target has different GPU type than the instance requires."""
+    """GPU type mismatch is logged but not rejected (GGUF is portable)."""
     host = Host(
         id="h-cuda",
         name="CUDA Host",
@@ -258,14 +258,18 @@ async def test_validate_target_gpu_type_mismatch():
         gpu_type="nvidia_cuda",
         status=HostStatus.ONLINE,
     )
-    with pytest.raises(HTTPException) as exc:
+    with patch("aiohttp.ClientSession.get") as mock_get:
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
+        mock_get.return_value.__aenter__.return_value = mock_resp
+
+        # Should not raise — GPU type difference is logged, not blocked
         await validate_target_fitness(
             host,
             {"priority": "staging"},
             source_gpu_type="apple_silicon",
         )
-    assert exc.value.status_code == 422
-    assert "gpu" in exc.value.detail.lower()
 
 
 @pytest.mark.anyio

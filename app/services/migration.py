@@ -216,8 +216,8 @@ async def validate_target_fitness(
     Checks:
     - Target has ``"inference"`` role
     - Production safeguard (requires explicit ``allow_production``)
-    - GPU type compatibility (rejects mismatch when both are known)
-    - Sufficient VRAM (best-effort, ≥ 2 GB threshold)
+    - GPU type difference is logged but not blocked (GGUF models are
+      portable across architectures and pulled fresh via S-019)\n    - Sufficient VRAM (best-effort, ≥ 2 GB threshold)
     - Sufficient disk space (best-effort, ≥ 5 GB threshold)
     """
     # Role check
@@ -244,16 +244,18 @@ async def validate_target_fitness(
             ),
         )
 
-    # GPU type compatibility check
+    # GPU type difference is logged but not rejected. GGUF models are
+    # portable across GPU architectures and the model is pulled fresh
+    # on the target host via S-019 distribution.  Placement constraints
+    # (deployment-intent §4.5) default gpu_type to null (any).
     if source_gpu_type and target_host.gpu_type:
         if source_gpu_type != target_host.gpu_type:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Target host '{target_host.name}' has GPU type "
-                    f"'{target_host.gpu_type}' but the instance requires "
-                    f"'{source_gpu_type}'. GPU type must match for migration."
-                ),
+            logger.info(
+                "GPU type differs — source '%s' (%s) → target '%s' (%s)",
+                source_gpu_type,
+                source_gpu_type,
+                target_host.name,
+                target_host.gpu_type,
             )
 
     # Resource check via /health (disk + VRAM)
