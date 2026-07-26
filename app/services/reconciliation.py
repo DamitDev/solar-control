@@ -660,6 +660,16 @@ class Reconciler:
                 action.reason,
             )
             await stop_source_instance(host, action.instance_id)
+            # Delete the instance so the reconciler stops observing it.
+            # Without this, stopped instances persist and observed_replicas
+            # can never reach 0 for DELETE / scale-to-zero flows.
+            try:
+                await self._delete_instance(host, action.instance_id)
+            except Exception:
+                logger.warning(
+                    "Failed to delete instance %s on %s after stop",
+                    action.instance_id, host.name, exc_info=True,
+                )
             return None
 
         if action.type == ActionType.DISOWN:
@@ -824,7 +834,7 @@ class Reconciler:
 
         return None
 
-    # ── Start instance ──────────────────────────────────────────
+    # ── Start / Delete instance helpers ────────────────────────
 
     async def _start_instance(self, host: Any, instance_id: str) -> None:
         """Start a stopped instance on *host* via POST /instances/{id}/start."""
@@ -843,17 +853,37 @@ class Reconciler:
                         text = await resp.text()
                         logger.warning(
                             "Failed to start instance %s on %s: HTTP %s %s",
-                            instance_id,
-                            host.name,
-                            resp.status,
-                            text,
+                            instance_id, host.name, resp.status, text,
                         )
         except Exception as e:
             logger.warning(
                 "Failed to start instance %s on %s: %s",
-                instance_id,
-                host.name,
-                e,
+                instance_id, host.name, e,
+            )
+
+    async def _delete_instance(self, host: Any, instance_id: str) -> None:
+        """Delete an instance from *host* via DELETE /instances/{id}."""
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{host.url.rstrip('/')}/instances/{instance_id}"
+                headers = {"X-API-Key": host.api_key}
+                async with session.delete(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status not in (200, 204, 404):
+                        text = await resp.text()
+                        logger.warning(
+                            "Failed to delete instance %s on %s: HTTP %s %s",
+                            instance_id, host.name, resp.status, text,
+                        )
+        except Exception as e:
+            logger.warning(
+                "Failed to delete instance %s on %s: %s",
+                instance_id, host.name, e,
             )
 
     # ── Build instance config ──────────────────────────────────
