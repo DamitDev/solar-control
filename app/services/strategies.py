@@ -181,6 +181,14 @@ class RollingStrategy:
         if needed <= 0:
             return None  # Already at desired state
 
+        # Only initiate strategy when there are drifted instances that
+        # need replacing.  Pure scale-up (same source, more replicas)
+        # and initial deployment (0→N) are handled by normal diff.
+        if updated == len(managed_instances) and needed > 0:
+            # All existing instances are already on target source —
+            # this is a pure scale-up, not a version change.
+            return None
+
         # Hosts of managed instances that are NOT yet on the target source
         drifted_host_ids = {
             inst.get("_host_id")
@@ -479,6 +487,11 @@ class ImmediateStrategy:
         if needed <= 0:
             return None  # Already at desired state
 
+        # Only initiate strategy when there are drifted instances that
+        # need replacing.  Pure scale-up is handled by normal diff.
+        if updated == len(managed_instances) and needed > 0:
+            return None
+
         # All managed instances with old source need stopping
         drifted = [
             inst for inst in managed_instances
@@ -498,7 +511,7 @@ class ImmediateStrategy:
 
         return {
             "strategy": "immediate",
-            "target_model_source": target_source,
+            "target_model_source": target_model_source,
             "phase": StrategyPhase.STOPPING_OLD,
             "step": f"0/{total_steps}",
             "updated": updated,
