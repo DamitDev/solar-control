@@ -459,6 +459,11 @@ async def host_health(sid: str, data: dict[str, Any]):
     )
     await sio.emit("host_health", payload.model_dump(), namespace="/webui")
 
+    # Wake reconciler — health/resource changes may affect placement decisions
+    from app.services.reconciliation import reconciler
+
+    reconciler.wake()
+
 
 @sio.on("instances_update", namespace="/hosts")
 async def host_instances_update(sid: str, data: dict[str, Any]):

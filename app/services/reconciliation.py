@@ -724,6 +724,17 @@ class Reconciler:
             from app.services.migration import execute_migration
             from app.routes.management.resources import _fetch_host_resource_snapshot
 
+            # Look up the source host to inherit its GPU type and roles as
+            # placement constraints for the migration target (§8.5: move to
+            # "another eligible host" implies matching capabilities).
+            source_host = await host_db.get_host(action.host_id)
+            host_roles = (
+                source_host.roles
+                if source_host and source_host.roles
+                else ["inference"]
+            )
+            host_gpu = source_host.gpu_type if source_host else None
+
             # Select a target host using placement policy
             all_hosts = await host_db.get_all_hosts()
             snapshots_list = await asyncio.gather(
@@ -734,7 +745,8 @@ class Reconciler:
             target_candidates = await find_candidates(
                 all_hosts,
                 snapshots_map,
-                roles=["inference"],
+                roles=host_roles,
+                gpu_type=host_gpu,
                 vram_gb=0.0,
                 exclude_alias=action.alias,
             )
