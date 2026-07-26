@@ -36,6 +36,16 @@ from .reservation import (
     ReservationRequest as ReservationRequest,
     ReservationResponse as ReservationResponse,
 )
+from .intent import (
+    IntentCreate as IntentCreate,
+    IntentDeletedResponse as IntentDeletedResponse,
+    IntentPhase as IntentPhase,
+    IntentResponse as IntentResponse,
+    IntentStatus as IntentStatus,
+    PlacementConstraints as PlacementConstraints,
+    ReconcileState as ReconcileState,
+    ResourceRequirements as ResourceRequirements,
+)
 from .socketio import (
     HostHealthPayload as HostHealthPayload,
     HostPendingPayload as HostPendingPayload,

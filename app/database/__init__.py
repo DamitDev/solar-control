@@ -3,6 +3,7 @@ from .hosts import host_db
 from .endpoints import endpoint_db
 from .logs import gateway_logger
 from .jobs import job_db
+from .intents import intent_db
 
 __all__ = [
     "get_engine",
@@ -13,4 +14,5 @@ __all__ = [
     "endpoint_db",
     "gateway_logger",
     "job_db",
+    "intent_db",
 ]

@@ -160,6 +160,8 @@ async def root():
                 "/api/resources",
                 "/api/instances/migrate",
                 "/api/resources/reservations",
+                "/api/intents",
+                "/api/intents/{id}",
             ],
             "realtime": [
                 "Socket.IO /hosts (host connections)",

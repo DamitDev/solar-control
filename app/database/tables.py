@@ -166,3 +166,62 @@ class JobRow(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class IntentRow(Base):
+    """A declarative deployment intent (S-040)."""
+
+    __tablename__ = "intents"
+    __table_args__ = (
+        Index("idx_intents_alias", "alias"),
+        Index("idx_intents_phase", "phase"),
+        Index("idx_intents_priority", "priority"),
+        Index("idx_intents_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    alias: Mapped[str] = mapped_column(Text, nullable=False)
+    model_source: Mapped[str] = mapped_column(Text, nullable=False)
+    replicas: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    priority: Mapped[str] = mapped_column(Text, nullable=False, default="production")
+    strategy: Mapped[str] = mapped_column(Text, nullable=False, default="rolling")
+    backend: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    placement: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    resources: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+    phase: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    reconcile: Mapped[str] = mapped_column(Text, nullable=False, default="idle")
+    status_json: Mapped[dict] = mapped_column(
+        "status",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ready_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
