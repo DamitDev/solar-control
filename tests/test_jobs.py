@@ -684,8 +684,14 @@ async def test_host_lifecycle_updates_status_and_forwards(online_training_host):
             AsyncMock(return_value=True),
         ) as mock_update,
         patch.object(
+            host_handlers.job_db,
+            "get_active_by_host",
+            AsyncMock(return_value=[]),
+        ),
+        patch.object(
             webui_handlers, "broadcast_job_lifecycle", AsyncMock()
         ) as mock_broadcast,
+        patch.object(host_handlers.sio, "emit", AsyncMock()),
     ):
         await host_handlers._handle_job_lifecycle("job_completed", "sid-1", event)
 
@@ -734,11 +740,21 @@ async def test_host_lifecycle_step_event_does_not_change_status(online_training_
         patch.object(
             host_handlers.job_db, "update_job_status", AsyncMock()
         ) as mock_update,
+        patch.object(
+            host_handlers.job_db, "update_job_step", AsyncMock(return_value=True)
+        ) as mock_update_step,
+        patch.object(
+            host_handlers.job_db,
+            "get_active_by_host",
+            AsyncMock(return_value=[]),
+        ),
         patch.object(webui_handlers, "broadcast_job_lifecycle", AsyncMock()),
+        patch.object(host_handlers.sio, "emit", AsyncMock()),
     ):
         await host_handlers._handle_job_lifecycle("step_started", "sid-1", event)
 
     mock_update.assert_not_called()
+    mock_update_step.assert_awaited_once_with("job-1", step_name="train", step_index=2)
 
 
 # ── WebUI Filter Tests ───────────────────────────────────────

@@ -57,6 +57,14 @@ class Job(BaseModel):
         default=None,
         description="Optional SuperNova submission ID, forwarded to the host",
     )
+    current_step_name: str | None = Field(
+        default=None,
+        description="Name of the currently executing pipeline step (e.g. 'train')",
+    )
+    current_step_index: int | None = Field(
+        default=None,
+        description="Zero-based index of the currently executing pipeline step",
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None

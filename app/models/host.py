@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 
 
 class HostStatus(str, Enum):
@@ -59,6 +60,57 @@ class HostResponse(BaseModel):
     message: str
 
 
+class ActiveJobSummary(BaseModel):
+    """Summary of an active or recently-terminal job on a host.
+
+    Provides operators and scheduling logic with a lightweight view of
+    what job workloads a host is running, without exposing the full
+    ``Job`` payload.
+    """
+
+    job_id: str
+    submission_id: str | None = Field(
+        default=None,
+        description="SuperNova submission ID for cross-system correlation",
+    )
+    name: str | None = Field(
+        default=None,
+        description="Human-readable job name from the pipeline definition",
+    )
+    status: str = Field(
+        ...,
+        description="Current job status (pending/running/completed/failed/cancelled)",
+    )
+    current_step_name: str | None = Field(
+        default=None,
+        description="Name of the currently executing pipeline step (e.g. 'train')",
+    )
+    current_step_index: int | None = Field(
+        default=None,
+        description="Zero-based index of the currently executing pipeline step",
+    )
+    pipeline: list[str] = Field(
+        default_factory=list,
+        description="Ordered list of all pipeline step names",
+    )
+    resource_hints: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Resource hints extracted from the job payload (VRAM, RAM, etc.)",
+    )
+    started_at: str | None = Field(
+        default=None,
+        description="ISO 8601 timestamp when the job was created or started",
+    )
+    completed_at: str | None = Field(
+        default=None,
+        description="ISO 8601 timestamp when the job reached a terminal state",
+    )
+    error_message: str | None = Field(
+        default=None,
+        description="Error message if the job failed or was cancelled",
+    )
+
+
 class HostResourceSnapshot(BaseModel):
     """Per-host resource snapshot in the aggregated cluster view (S-035).
 
@@ -110,6 +162,12 @@ class HostResourceSnapshot(BaseModel):
     # Running workloads (from Redis instance cache)
     instance_count: int = 0
     running_instance_count: int = 0
+
+    # Active job workloads (from jobs table — training pipelines etc.)
+    active_jobs: list[ActiveJobSummary] = Field(
+        default_factory=list,
+        description="Active and recently-terminal job workloads on this host",
+    )
 
     # Reservation summary (totals only — no per-reservation list)
     reservation_count: int = 0

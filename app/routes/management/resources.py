@@ -6,12 +6,16 @@ GET /api/resources — cluster-wide view of host capacity, workloads, and reserv
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Query
 
 from app.database.hosts import host_db
+from app.database.jobs import job_db
 from app.models import Host, HostResourceSnapshot, AggregatedResourceResponse
+from app.models.host import ActiveJobSummary
+from app.models.job import Job
 from app.redis_state import host_store
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,39 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/resources", tags=["resources"])
 
 _RESOURCE_TIMEOUT = 5  # seconds to wait for a host's /resources response
+
+
+def _job_to_active_summary(job: Job) -> ActiveJobSummary:
+    """Convert a ``Job`` record to an ``ActiveJobSummary`` for resource views."""
+    payload = job.payload or {}
+    pipeline: list[str] = list(payload.get("pipeline", []))
+    name: str | None = payload.get("name")
+
+    resource_hints: dict[str, Any] = {}
+    training_config = payload.get("training_config") or {}
+    if training_config:
+        resource_hints["training_config"] = {
+            k: training_config[k]
+            for k in ("batch_size", "max_steps", "learning_rate")
+            if k in training_config
+        }
+    resources = payload.get("resources") or {}
+    if resources:
+        resource_hints["resources"] = resources
+
+    return ActiveJobSummary(
+        job_id=job.id,
+        submission_id=job.submission_id,
+        name=name,
+        status=job.status.value,
+        current_step_name=job.current_step_name,
+        current_step_index=job.current_step_index,
+        pipeline=pipeline,
+        resource_hints=resource_hints,
+        started_at=job.created_at.isoformat() if job.created_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        error_message=job.error_message,
+    )
 
 
 async def _fetch_host_resource_snapshot(
@@ -55,6 +92,17 @@ async def _fetch_host_resource_snapshot(
     except Exception:
         logger.warning(
             "Failed to fetch instances from Redis for host %s",
+            host.id,
+            exc_info=True,
+        )
+
+    # Aggregate active job workloads from the jobs table
+    try:
+        jobs = await job_db.get_active_by_host(host.id)
+        base.active_jobs = [_job_to_active_summary(j) for j in jobs]
+    except Exception:
+        logger.warning(
+            "Failed to fetch active jobs for host %s",
             host.id,
             exc_info=True,
         )

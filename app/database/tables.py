@@ -157,6 +157,16 @@ class JobRow(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     submission_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_step_name: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Name of the currently executing pipeline step (e.g. 'train')",
+    )
+    current_step_index: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Zero-based index of the currently executing pipeline step",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

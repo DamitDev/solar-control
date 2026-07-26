@@ -3,7 +3,7 @@ from typing import Any
 from datetime import datetime, timezone
 from enum import Enum
 
-from .host import Host, MemoryInfo
+from .host import ActiveJobSummary, Host, MemoryInfo
 
 
 class WSMessageType(str, Enum):
@@ -100,10 +100,20 @@ class HostStatusPayload(BaseModel):
     memory_available_gb: float | None = None
     version: str | None = None
     connected: bool = False
+    active_jobs: list[ActiveJobSummary] = Field(
+        default_factory=list,
+        description="Active and recently-terminal job workloads on this host",
+    )
     timestamp: str = ""
 
     @classmethod
-    def from_host(cls, host: Host, *, connected: bool) -> "HostStatusPayload":
+    def from_host(
+        cls,
+        host: Host,
+        *,
+        connected: bool,
+        active_jobs: list[ActiveJobSummary] | None = None,
+    ) -> "HostStatusPayload":
         return cls(
             host_id=host.id,
             name=host.name,
@@ -119,6 +129,7 @@ class HostStatusPayload(BaseModel):
             memory_available_gb=host.memory_available_gb,
             version=host.version,
             connected=connected,
+            active_jobs=active_jobs or [],
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 

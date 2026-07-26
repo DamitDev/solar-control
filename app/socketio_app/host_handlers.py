@@ -20,7 +20,8 @@ from .server import sio
 from app.database.hosts import host_db
 from app.database.jobs import job_db
 from app.models import Host, HostStatus
-from app.models.job import JobStatus
+from app.models.host import ActiveJobSummary
+from app.models.job import Job, JobStatus
 from app.models.socketio import (
     HostHealthPayload,
     HostPendingPayload,
@@ -64,9 +65,59 @@ def _api_key_preview(api_key: str) -> str:
     return api_key[:8] + "..." if len(api_key) > 8 else api_key
 
 
+def _job_to_active_summary(job: Job) -> ActiveJobSummary:
+    """Convert a ``Job`` record to an ``ActiveJobSummary`` for host status views.
+
+    Extracts the job name and pipeline from the payload, and surfaces
+    resource hints where available.
+    """
+    payload = job.payload or {}
+    pipeline: list[str] = list(payload.get("pipeline", []))
+    name: str | None = payload.get("name")
+
+    # Extract lightweight resource hints from the payload.
+    resource_hints: dict[str, Any] = {}
+    training_config = payload.get("training_config") or {}
+    if training_config:
+        resource_hints["training_config"] = {
+            k: training_config[k]
+            for k in ("batch_size", "max_steps", "learning_rate")
+            if k in training_config
+        }
+    resources = payload.get("resources") or {}
+    if resources:
+        resource_hints["resources"] = resources
+
+    return ActiveJobSummary(
+        job_id=job.id,
+        submission_id=job.submission_id,
+        name=name,
+        status=job.status.value,
+        current_step_name=job.current_step_name,
+        current_step_index=job.current_step_index,
+        pipeline=pipeline,
+        resource_hints=resource_hints,
+        started_at=job.created_at.isoformat() if job.created_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        error_message=job.error_message,
+    )
+
+
+async def _get_host_active_jobs(host_id: str) -> list[ActiveJobSummary]:
+    """Aggregate active and recently-terminal jobs for *host_id*.
+
+    Queries the jobs table and maps each ``Job`` to an ``ActiveJobSummary``.
+    """
+    jobs = await job_db.get_active_by_host(host_id)
+    return [_job_to_active_summary(j) for j in jobs]
+
+
 async def _emit_host_status(host: Host, *, connected: bool) -> None:
     """Emit a host_status event to WebUI using the typed payload model."""
-    payload = HostStatusPayload.from_host(host, connected=connected)
+    active_jobs = await _get_host_active_jobs(host.id)
+    payload = HostStatusPayload.from_host(
+        host, connected=connected, active_jobs=active_jobs
+    )
     await sio.emit("host_status", payload.model_dump(), namespace="/webui")
 
 
@@ -646,9 +697,25 @@ async def _handle_job_lifecycle(
         ):
             _correlation_cache.pop(job_id, None)
 
+    # Persist current pipeline step on step_started events.
+    if event_name == "step_started" and job_id:
+        step_name = data.get("step_name")
+        step_index = data.get("step_index")
+        if step_name is not None or step_index is not None:
+            await job_db.update_job_step(
+                job_id,
+                step_name=str(step_name) if step_name is not None else None,
+                step_index=int(step_index) if step_index is not None else None,
+            )
+
     from .webui_handlers import broadcast_job_lifecycle as _b
 
     await _b(payload.model_dump())
+
+    # Broadcast updated host status so WebUI consumers see the new
+    # active_jobs summary immediately.
+    if host and job_id:
+        await _emit_host_status(host, connected=True)
 
 
 def _make_lifecycle_handler(event_name: str):

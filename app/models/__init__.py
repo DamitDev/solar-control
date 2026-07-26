@@ -2,6 +2,7 @@ from .gateway import (
     RegistryEntry as RegistryEntry,
 )
 from .host import (
+    ActiveJobSummary as ActiveJobSummary,
     AggregatedResourceResponse as AggregatedResourceResponse,
     Host as Host,
     HostCreate as HostCreate,

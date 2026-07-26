@@ -1,13 +1,17 @@
 """PostgreSQL-backed job CRUD operations using SQLAlchemy ORM."""
 
 from typing import Any
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, delete, update
 
 from app.models.job import Job, JobStatus
 from .connection import get_session_factory
 from .tables import JobRow
+
+# How long to retain terminal (completed/failed/cancelled) jobs in the
+# active-job aggregation view after they finish.
+_TERMINAL_RETENTION_MINUTES = 15
 
 
 class JobDB:
@@ -26,6 +30,8 @@ class JobDB:
             error_message=row.error_message,
             correlation_id=row.correlation_id,
             submission_id=row.submission_id,
+            current_step_name=row.current_step_name,
+            current_step_index=row.current_step_index,
             created_at=row.created_at,
             updated_at=row.updated_at,
             completed_at=row.completed_at,
@@ -41,6 +47,8 @@ class JobDB:
             "error_message": job.error_message,
             "correlation_id": job.correlation_id,
             "submission_id": job.submission_id,
+            "current_step_name": job.current_step_name,
+            "current_step_index": job.current_step_index,
             "created_at": job.created_at,
             "updated_at": job.updated_at,
             "completed_at": job.completed_at,
@@ -127,6 +135,65 @@ class JobDB:
             )
             await session.commit()
             return result.rowcount > 0
+
+    async def update_job_step(
+        self,
+        job_id: str,
+        *,
+        step_name: str | None = None,
+        step_index: int | None = None,
+    ) -> bool:
+        """Update the current pipeline step for a job."""
+        values: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+        if step_name is not None:
+            values["current_step_name"] = step_name
+        if step_index is not None:
+            values["current_step_index"] = step_index
+
+        async with self._session() as session:
+            result = await session.execute(
+                update(JobRow).where(JobRow.id == job_id).values(**values)
+            )
+            await session.commit()
+            return result.rowcount > 0
+
+    async def get_active_by_host(
+        self,
+        host_id: str,
+        *,
+        terminal_retention_minutes: int = _TERMINAL_RETENTION_MINUTES,
+    ) -> list[Job]:
+        """Get active and recently-terminal jobs for a given host.
+
+        Returns jobs that are:
+        - Non-terminal (pending, running), OR
+        - Terminal (completed, failed, cancelled) within the retention window.
+
+        Ordered by creation time descending (most recent first).
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            minutes=terminal_retention_minutes
+        )
+        terminal_statuses = [
+            JobStatus.COMPLETED.value,
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+        ]
+
+        async with self._session() as session:
+            result = await session.execute(
+                select(JobRow)
+                .where(JobRow.host_id == host_id)
+                .where(
+                    (JobRow.status.notin_(terminal_statuses))
+                    | (
+                        (JobRow.status.in_(terminal_statuses))
+                        & (JobRow.completed_at >= cutoff)
+                    )
+                )
+                .order_by(JobRow.created_at.desc())
+            )
+            return [self._row_to_job(row) for row in result.scalars()]
 
     async def remove_job(self, job_id: str) -> bool:
         """Delete a job record."""
