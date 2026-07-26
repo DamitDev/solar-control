@@ -637,12 +637,18 @@ class Reconciler:
             return None
 
         if action.type == ActionType.DISOWN:
-            # Clear ownership markers so the instance becomes unmanaged
+            # Clear ownership markers from the instance in Redis so the
+            # reconciler stops tracking it.  The underlying Solar Host
+            # instance config retains the markers (there is no host-side
+            # PATCH for running instances), but the stale reference is
+            # harmless: the intent is being deleted and will not be
+            # reconciled again.
             if not action.host_id or not action.instance_id:
                 return None
             from app.redis_state import host_store as _hs
 
             instances = await _hs.get_host_instances(action.host_id)
+            found = False
             for inst in instances:
                 iid = inst.get("instance_id") or inst.get("id")
                 if iid == action.instance_id:
@@ -653,7 +659,10 @@ class Reconciler:
                         inst["config"] = cfg
                     inst.pop("managed_by", None)
                     inst.pop("intent_id", None)
+                    found = True
                     break
+            if found:
+                await _hs.set_host_instances(action.host_id, instances)
             logger.info(
                 "Disowned instance %s on host %s (reason: %s)",
                 action.instance_id,

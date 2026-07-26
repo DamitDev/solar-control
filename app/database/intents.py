@@ -160,7 +160,13 @@ class IntentDB:
     async def soft_delete_intent(
         self, intent_id: str, *, orphan: bool = False
     ) -> IntentResponse | None:
-        """Mark an intent as deleted (soft-delete with deleted_at timestamp).
+        """Transition an intent to 'deleting' so the reconciler cleans it up.
+
+        The reconciler (S-041) will stop or disown managed instances, then
+        transition the phase to 'deleted'.  ``deleted_at`` is set by
+        ``update_status()`` once reconciliation confirms zero observed
+        replicas — setting it here would exclude the intent from
+        ``list_active_for_reconciliation()`` and block cleanup.
 
         If *orphan* is True, the reconciler will clear ownership markers
         instead of stopping managed instances.
@@ -171,7 +177,6 @@ class IntentDB:
             if row is None or row.deleted_at is not None:
                 return None
             row.phase = "deleting"
-            row.deleted_at = now
             row.updated_at = now
             # Store orphan flag in metadata so the reconciler can read it
             if orphan:
@@ -236,15 +241,25 @@ class IntentDB:
 
         Only the provided non-None kwargs are written; all others are
         left unchanged.  Returns the updated intent or None if the
-        intent is deleted/unknown.
+        intent is unknown or has already been soft-deleted.
+
+        When *phase* transitions to ``"deleted"``, ``deleted_at`` is set
+        automatically so ``list_active_for_reconciliation()`` excludes
+        the intent from future reconciliation passes.
         """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
             row = await session.get(IntentRow, intent_id)
-            if row is None or row.deleted_at is not None:
+            if row is None:
+                return None
+            # Once soft-deleted, status updates are rejected
+            if row.deleted_at is not None:
                 return None
             if phase is not None:
                 row.phase = phase
+                # Auto-soft-delete when the reconciler confirms cleanup
+                if phase == "deleted":
+                    row.deleted_at = now
             if reconcile is not None:
                 row.reconcile = reconcile
             if status_json is not None:
