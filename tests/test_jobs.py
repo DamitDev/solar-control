@@ -691,7 +691,7 @@ async def test_host_lifecycle_updates_status_and_forwards(online_training_host):
         patch.object(
             webui_handlers, "broadcast_job_lifecycle", AsyncMock()
         ) as mock_broadcast,
-        patch.object(host_handlers.sio, "emit", AsyncMock()),
+        patch.object(host_handlers.sio, "emit", AsyncMock()) as mock_emit,
     ):
         await host_handlers._handle_job_lifecycle("job_completed", "sid-1", event)
 
@@ -706,6 +706,12 @@ async def test_host_lifecycle_updates_status_and_forwards(online_training_host):
     assert payload["correlation_id"] == "corr-1"
     # Non-normalized extras are preserved under `data`.
     assert payload["data"]["workspace_path"] == "/jobs/job-1"
+
+    # A host_status broadcast is emitted so WebUI sees updated active_jobs.
+    emit_calls = [c for c in mock_emit.call_args_list if c[0][0] == "host_status"]
+    assert len(emit_calls) == 1
+    assert emit_calls[0][0][1]["host_id"] == "host-1"
+    assert emit_calls[0][0][1]["active_jobs"] == []
 
 
 @pytest.mark.anyio
@@ -749,12 +755,17 @@ async def test_host_lifecycle_step_event_does_not_change_status(online_training_
             AsyncMock(return_value=[]),
         ),
         patch.object(webui_handlers, "broadcast_job_lifecycle", AsyncMock()),
-        patch.object(host_handlers.sio, "emit", AsyncMock()),
+        patch.object(host_handlers.sio, "emit", AsyncMock()) as mock_emit,
     ):
         await host_handlers._handle_job_lifecycle("step_started", "sid-1", event)
 
     mock_update.assert_not_called()
     mock_update_step.assert_awaited_once_with("job-1", step_name="train", step_index=2)
+
+    # A host_status broadcast is emitted so WebUI sees updated active_jobs.
+    emit_calls = [c for c in mock_emit.call_args_list if c[0][0] == "host_status"]
+    assert len(emit_calls) == 1
+    assert emit_calls[0][0][1]["host_id"] == "host-1"
 
 
 # ── WebUI Filter Tests ───────────────────────────────────────

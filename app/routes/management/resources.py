@@ -28,7 +28,9 @@ _RESOURCE_TIMEOUT = 5  # seconds to wait for a host's /resources response
 def _job_to_active_summary(job: Job) -> ActiveJobSummary:
     """Convert a ``Job`` record to an ``ActiveJobSummary`` for resource views."""
     payload = job.payload or {}
-    pipeline: list[str] = list(payload.get("pipeline", []))
+    # The translated payload stores steps as a list of dicts with a "name" key.
+    steps: list[dict] = payload.get("steps", [])
+    pipeline: list[str] = [s["name"] for s in steps if isinstance(s, dict)]
     name: str | None = payload.get("name")
 
     resource_hints: dict[str, Any] = {}
