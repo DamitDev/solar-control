@@ -484,6 +484,11 @@ async def host_instances_update(sid: str, data: dict[str, Any]):
     except Exception:
         pass
 
+    # Wake reconciler — instance changes may affect intent status
+    from app.services.reconciliation import reconciler
+
+    reconciler.wake()
+
 
 # ── Job event handlers (S-025 step_log, S-026 lifecycle) ────
 #

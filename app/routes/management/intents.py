@@ -114,7 +114,7 @@ async def delete_intent(
     Marks the intent as 'deleting'. The S-041 reconciler will stop
     managed instances (or orphan them if ?orphan=true).
     """
-    intent = await intent_db.soft_delete_intent(intent_id)
+    intent = await intent_db.soft_delete_intent(intent_id, orphan=orphan)
     if intent is None:
         raise HTTPException(status_code=404, detail="Intent not found")
 

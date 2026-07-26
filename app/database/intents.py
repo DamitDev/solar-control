@@ -157,8 +157,14 @@ class IntentDB:
             result = await session.execute(stmt)
             return [self._row_to_response(row) for row in result.scalars()]
 
-    async def soft_delete_intent(self, intent_id: str) -> IntentResponse | None:
-        """Mark an intent as deleted (soft-delete with deleted_at timestamp)."""
+    async def soft_delete_intent(
+        self, intent_id: str, *, orphan: bool = False
+    ) -> IntentResponse | None:
+        """Mark an intent as deleted (soft-delete with deleted_at timestamp).
+
+        If *orphan* is True, the reconciler will clear ownership markers
+        instead of stopping managed instances.
+        """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
             row = await session.get(IntentRow, intent_id)
@@ -167,6 +173,11 @@ class IntentDB:
             row.phase = "deleting"
             row.deleted_at = now
             row.updated_at = now
+            # Store orphan flag in metadata so the reconciler can read it
+            if orphan:
+                meta = dict(row.metadata_ or {})
+                meta["orphan"] = "true"
+                row.metadata_ = meta
             await session.commit()
             await session.refresh(row)
             return self._row_to_response(row)
