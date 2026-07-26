@@ -1,6 +1,15 @@
 from fastapi import APIRouter
 from app.jobs import router as jobs_router
-from . import hosts, endpoints, gateway, models, resources, instances, reservations, intents
+from . import (
+    hosts,
+    endpoints,
+    gateway,
+    models,
+    resources,
+    instances,
+    reservations,
+    intents,
+)
 
 router = APIRouter(prefix="/api", tags=["management"])
 router.include_router(hosts.router)

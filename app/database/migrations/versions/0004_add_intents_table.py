@@ -48,9 +48,7 @@ def upgrade() -> None:
             sa.Column(
                 "priority", sa.Text(), nullable=False, server_default="production"
             ),
-            sa.Column(
-                "strategy", sa.Text(), nullable=False, server_default="rolling"
-            ),
+            sa.Column("strategy", sa.Text(), nullable=False, server_default="rolling"),
             sa.Column(
                 "backend",
                 postgresql.JSONB(),
@@ -75,12 +73,8 @@ def upgrade() -> None:
                 nullable=False,
                 server_default=sa.text("'{}'::jsonb"),
             ),
-            sa.Column(
-                "phase", sa.Text(), nullable=False, server_default="pending"
-            ),
-            sa.Column(
-                "reconcile", sa.Text(), nullable=False, server_default="idle"
-            ),
+            sa.Column("phase", sa.Text(), nullable=False, server_default="pending"),
+            sa.Column("reconcile", sa.Text(), nullable=False, server_default="idle"),
             sa.Column(
                 "status",
                 postgresql.JSONB(),

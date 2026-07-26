@@ -12,17 +12,25 @@ from fastapi import HTTPException
 
 VALID_PRIORITIES: frozenset[str] = frozenset({"production", "staging", "ephemeral"})
 VALID_STRATEGIES: frozenset[str] = frozenset({"rolling", "immediate"})
-VALID_BACKEND_TYPES: frozenset[str] = frozenset({
-    "llamacpp",
-    "huggingface_causal",
-    "huggingface_classification",
-    "huggingface_embedding",
-    "huggingface_vision",
-})
+VALID_BACKEND_TYPES: frozenset[str] = frozenset(
+    {
+        "llamacpp",
+        "huggingface_causal",
+        "huggingface_classification",
+        "huggingface_embedding",
+        "huggingface_vision",
+    }
+)
 VALID_MODEL_SOURCE_SCHEMES: frozenset[str] = frozenset({"repo", "huggingface", "local"})
-FORBIDDEN_BACKEND_FIELDS: frozenset[str] = frozenset({
-    "alias", "model_source", "host", "port", "api_key",
-})
+FORBIDDEN_BACKEND_FIELDS: frozenset[str] = frozenset(
+    {
+        "alias",
+        "model_source",
+        "host",
+        "port",
+        "api_key",
+    }
+)
 
 
 def validate_priority(instance_data: dict[str, Any]) -> None:
@@ -49,7 +57,9 @@ def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
     # alias
     alias = data.get("alias")
     if not alias or not isinstance(alias, str) or not alias.strip():
-        errors.append({"field": "alias", "message": "alias is required and must be non-empty"})
+        errors.append(
+            {"field": "alias", "message": "alias is required and must be non-empty"}
+        )
 
     # model_source
     model_source = data.get("model_source", "")
@@ -58,13 +68,15 @@ def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
     else:
         parsed = urlparse(model_source)
         if parsed.scheme not in VALID_MODEL_SOURCE_SCHEMES:
-            errors.append({
-                "field": "model_source",
-                "message": (
-                    f"unsupported scheme '{parsed.scheme}'. "
-                    f"Must be one of: {', '.join(sorted(VALID_MODEL_SOURCE_SCHEMES))}"
-                ),
-            })
+            errors.append(
+                {
+                    "field": "model_source",
+                    "message": (
+                        f"unsupported scheme '{parsed.scheme}'. "
+                        f"Must be one of: {', '.join(sorted(VALID_MODEL_SOURCE_SCHEMES))}"
+                    ),
+                }
+            )
 
     # replicas
     replicas = data.get("replicas", 1)
@@ -74,24 +86,28 @@ def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
     # priority
     priority = data.get("priority", "production")
     if priority not in VALID_PRIORITIES:
-        errors.append({
-            "field": "priority",
-            "message": (
-                f"'{priority}' is not a valid priority. "
-                f"Must be one of: {', '.join(sorted(VALID_PRIORITIES))}"
-            ),
-        })
+        errors.append(
+            {
+                "field": "priority",
+                "message": (
+                    f"'{priority}' is not a valid priority. "
+                    f"Must be one of: {', '.join(sorted(VALID_PRIORITIES))}"
+                ),
+            }
+        )
 
     # strategy
     strategy = data.get("strategy", "rolling")
     if strategy not in VALID_STRATEGIES:
-        errors.append({
-            "field": "strategy",
-            "message": (
-                f"'{strategy}' is not a valid strategy. "
-                f"Must be one of: {', '.join(sorted(VALID_STRATEGIES))}"
-            ),
-        })
+        errors.append(
+            {
+                "field": "strategy",
+                "message": (
+                    f"'{strategy}' is not a valid strategy. "
+                    f"Must be one of: {', '.join(sorted(VALID_STRATEGIES))}"
+                ),
+            }
+        )
 
     # backend
     backend = data.get("backend", {})
@@ -100,32 +116,40 @@ def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
     else:
         backend_type = backend.get("backend_type")
         if not backend_type:
-            errors.append({"field": "backend.backend_type", "message": "backend_type is required"})
+            errors.append(
+                {"field": "backend.backend_type", "message": "backend_type is required"}
+            )
         elif backend_type not in VALID_BACKEND_TYPES:
-            errors.append({
-                "field": "backend.backend_type",
-                "message": (
-                    f"'{backend_type}' is not a supported backend_type. "
-                    f"Must be one of: {', '.join(sorted(VALID_BACKEND_TYPES))}"
-                ),
-            })
+            errors.append(
+                {
+                    "field": "backend.backend_type",
+                    "message": (
+                        f"'{backend_type}' is not a supported backend_type. "
+                        f"Must be one of: {', '.join(sorted(VALID_BACKEND_TYPES))}"
+                    ),
+                }
+            )
 
         # Forbidden fields
         for forbidden in FORBIDDEN_BACKEND_FIELDS:
             if forbidden in backend:
-                errors.append({
-                    "field": f"backend.{forbidden}",
-                    "message": f"'{forbidden}' is server-derived and must not be set by the client",
-                })
+                errors.append(
+                    {
+                        "field": f"backend.{forbidden}",
+                        "message": f"'{forbidden}' is server-derived and must not be set by the client",
+                    }
+                )
 
     # placement
     placement = data.get("placement", {})
     if isinstance(placement, dict):
         roles = placement.get("roles", ["inference"])
         if not isinstance(roles, list) or len(roles) == 0:
-            errors.append({
-                "field": "placement.roles",
-                "message": "placement.roles must be a non-empty list",
-            })
+            errors.append(
+                {
+                    "field": "placement.roles",
+                    "message": "placement.roles must be a non-empty list",
+                }
+            )
 
     return errors

@@ -151,7 +151,9 @@ class IntentDB:
             if phase:
                 stmt = stmt.where(IntentRow.phase == phase)
 
-            stmt = stmt.order_by(IntentRow.created_at.desc()).limit(limit).offset(offset)
+            stmt = (
+                stmt.order_by(IntentRow.created_at.desc()).limit(limit).offset(offset)
+            )
             result = await session.execute(stmt)
             return [self._row_to_response(row) for row in result.scalars()]
 

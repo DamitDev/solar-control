@@ -3,7 +3,6 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from fastapi import HTTPException
 
 from app.models.intent import (
     IntentCreate,
@@ -16,8 +15,8 @@ from app.models.intent import (
 )
 from app.validation import validate_intent_create
 
-
 # ── Validation unit tests ──────────────────────────────────────
+
 
 def test_validate_intent_create_valid_minimal():
     """Minimal valid intent passes validation."""
@@ -57,130 +56,156 @@ def test_validate_intent_create_valid_full():
 
 
 def test_validate_intent_missing_alias():
-    errors = validate_intent_create({
-        "model_source": "repo://x:v1",
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert any(e["field"] == "alias" for e in errors)
 
 
 def test_validate_intent_missing_model_source():
-    errors = validate_intent_create({
-        "alias": "x",
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert any(e["field"] == "model_source" for e in errors)
 
 
 def test_validate_intent_invalid_scheme():
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "http://example.com/model",
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "http://example.com/model",
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert any(e["field"] == "model_source" for e in errors)
 
 
 def test_validate_intent_local_scheme():
     """local:// is a valid scheme."""
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "local:///opt/models/model.gguf",
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "local:///opt/models/model.gguf",
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert errors == []
 
 
 def test_validate_intent_huggingface_scheme():
     """huggingface:// is a valid scheme."""
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "huggingface://meta-llama/Llama-2-7b-hf",
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://meta-llama/Llama-2-7b-hf",
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert errors == []
 
 
 def test_validate_intent_negative_replicas():
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "repo://x:v1",
-        "replicas": -1,
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "repo://x:v1",
+            "replicas": -1,
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert any(e["field"] == "replicas" for e in errors)
 
 
 def test_validate_intent_zero_replicas():
     """replicas=0 is valid (pre-create then scale up)."""
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "repo://x:v1",
-        "replicas": 0,
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "repo://x:v1",
+            "replicas": 0,
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert errors == []
 
 
 def test_validate_intent_invalid_priority():
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "repo://x:v1",
-        "priority": "critical",
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "repo://x:v1",
+            "priority": "critical",
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert any(e["field"] == "priority" for e in errors)
 
 
 def test_validate_intent_all_valid_priorities():
     """All three valid priorities pass."""
     for p in ["production", "staging", "ephemeral"]:
-        errors = validate_intent_create({
-            "alias": "x",
-            "model_source": "repo://x:v1",
-            "priority": p,
-            "backend": {"backend_type": "llamacpp"},
-        })
+        errors = validate_intent_create(
+            {
+                "alias": "x",
+                "model_source": "repo://x:v1",
+                "priority": p,
+                "backend": {"backend_type": "llamacpp"},
+            }
+        )
         assert errors == [], f"Priority '{p}' should be valid"
 
 
 def test_validate_intent_invalid_strategy():
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "repo://x:v1",
-        "strategy": "blue-green",
-        "backend": {"backend_type": "llamacpp"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "repo://x:v1",
+            "strategy": "blue-green",
+            "backend": {"backend_type": "llamacpp"},
+        }
+    )
     assert any(e["field"] == "strategy" for e in errors)
 
 
 def test_validate_intent_all_valid_strategies():
     """Both valid strategies pass."""
     for s in ["rolling", "immediate"]:
-        errors = validate_intent_create({
-            "alias": "x",
-            "model_source": "repo://x:v1",
-            "strategy": s,
-            "backend": {"backend_type": "llamacpp"},
-        })
+        errors = validate_intent_create(
+            {
+                "alias": "x",
+                "model_source": "repo://x:v1",
+                "strategy": s,
+                "backend": {"backend_type": "llamacpp"},
+            }
+        )
         assert errors == [], f"Strategy '{s}' should be valid"
 
 
 def test_validate_intent_missing_backend_type():
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "repo://x:v1",
-        "backend": {},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "repo://x:v1",
+            "backend": {},
+        }
+    )
     assert any(e["field"] == "backend.backend_type" for e in errors)
 
 
 def test_validate_intent_invalid_backend_type():
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "repo://x:v1",
-        "backend": {"backend_type": "unknown_type"},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "unknown_type"},
+        }
+    )
     assert any(e["field"] == "backend.backend_type" for e in errors)
 
 
@@ -193,38 +218,45 @@ def test_validate_intent_all_valid_backend_types():
         "huggingface_embedding",
         "huggingface_vision",
     ]:
-        errors = validate_intent_create({
-            "alias": "x",
-            "model_source": "repo://x:v1",
-            "backend": {"backend_type": bt},
-        })
+        errors = validate_intent_create(
+            {
+                "alias": "x",
+                "model_source": "repo://x:v1",
+                "backend": {"backend_type": bt},
+            }
+        )
         assert errors == [], f"backend_type '{bt}' should be valid"
 
 
 def test_validate_intent_forbidden_backend_fields():
     """Server-derived fields must not appear in backend."""
     for forbidden in ["alias", "model_source", "host", "port", "api_key"]:
-        errors = validate_intent_create({
-            "alias": "x",
-            "model_source": "repo://x:v1",
-            "backend": {"backend_type": "llamacpp", forbidden: "value"},
-        })
+        errors = validate_intent_create(
+            {
+                "alias": "x",
+                "model_source": "repo://x:v1",
+                "backend": {"backend_type": "llamacpp", forbidden: "value"},
+            }
+        )
         assert any(
             e["field"] == f"backend.{forbidden}" for e in errors
         ), f"Expected error for backend.{forbidden}"
 
 
 def test_validate_intent_empty_placement_roles():
-    errors = validate_intent_create({
-        "alias": "x",
-        "model_source": "repo://x:v1",
-        "backend": {"backend_type": "llamacpp"},
-        "placement": {"roles": []},
-    })
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "llamacpp"},
+            "placement": {"roles": []},
+        }
+    )
     assert any(e["field"] == "placement.roles" for e in errors)
 
 
 # ── Model unit tests ────────────────────────────────────────────
+
 
 def test_intent_create_defaults():
     """IntentCreate applies correct defaults."""

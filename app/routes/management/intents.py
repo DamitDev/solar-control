@@ -10,7 +10,12 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.models.intent import IntentCreate, IntentDeletedResponse, IntentPhase, IntentResponse
+from app.models.intent import (
+    IntentCreate,
+    IntentDeletedResponse,
+    IntentPhase,
+    IntentResponse,
+)
 from app.database.intents import intent_db
 from app.validation import validate_intent_create
 
