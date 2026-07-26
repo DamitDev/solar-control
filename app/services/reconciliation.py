@@ -668,7 +668,9 @@ class Reconciler:
             except Exception:
                 logger.warning(
                     "Failed to delete instance %s on %s after stop",
-                    action.instance_id, host.name, exc_info=True,
+                    action.instance_id,
+                    host.name,
+                    exc_info=True,
                 )
             return None
 
@@ -853,12 +855,17 @@ class Reconciler:
                         text = await resp.text()
                         logger.warning(
                             "Failed to start instance %s on %s: HTTP %s %s",
-                            instance_id, host.name, resp.status, text,
+                            instance_id,
+                            host.name,
+                            resp.status,
+                            text,
                         )
         except Exception as e:
             logger.warning(
                 "Failed to start instance %s on %s: %s",
-                instance_id, host.name, e,
+                instance_id,
+                host.name,
+                e,
             )
 
     async def _delete_instance(self, host: Any, instance_id: str) -> None:
@@ -878,12 +885,17 @@ class Reconciler:
                         text = await resp.text()
                         logger.warning(
                             "Failed to delete instance %s on %s: HTTP %s %s",
-                            instance_id, host.name, resp.status, text,
+                            instance_id,
+                            host.name,
+                            resp.status,
+                            text,
                         )
         except Exception as e:
             logger.warning(
                 "Failed to delete instance %s on %s: %s",
-                instance_id, host.name, e,
+                instance_id,
+                host.name,
+                e,
             )
 
     # ── Build instance config ──────────────────────────────────
