@@ -573,14 +573,20 @@ class Reconciler:
         # ── Observed > Desired → STOP surplus ────────────────────
         surplus = observed_count - desired
         if surplus > 0:
-            # Sort: unhealthy first, then newest (by created_at if available)
-            def _stop_sort_key(inst: dict[str, Any]) -> tuple[int, str]:
+            # Sort per §8.2: unhealthy/failed first (oldest→newest within
+            # that group), then healthy instances most-recently-created
+            # first so long-lived replicas survive.
+            unhealthy_insts: list[dict[str, Any]] = []
+            healthy_insts: list[dict[str, Any]] = []
+            for inst in managed:
                 status = inst.get("status") or inst.get("state", "")
-                unhealthy = 0 if status in ("failed", "stopped", "error") else 1
-                created = inst.get("created_at") or "0"
-                return (unhealthy, created)
-
-            to_stop = sorted(managed, key=_stop_sort_key)[:surplus]
+                if status in ("failed", "stopped", "error"):
+                    unhealthy_insts.append(inst)
+                else:
+                    healthy_insts.append(inst)
+            unhealthy_insts.sort(key=lambda i: i.get("created_at") or "0")
+            healthy_insts.sort(key=lambda i: i.get("created_at") or "0", reverse=True)
+            to_stop = (unhealthy_insts + healthy_insts)[:surplus]
             for inst in to_stop:
                 inst_id = inst.get("instance_id") or inst.get("id")
                 if inst_id:
