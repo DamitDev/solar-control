@@ -197,6 +197,10 @@ class Reconciler:
         """Reconcile a single intent: observe → diff → act → update status.
 
         Implements deployment-intent.md §8.1 reconciliation loop.
+
+        When a deployment strategy is in-flight (strategy_progress is set),
+        delegates to the strategy state machine instead of the normal
+        diff/act path (S-042 §11).
         """
         # Check backoff before acting
         if self._backoff_active(intent.id):
@@ -206,8 +210,66 @@ class Reconciler:
         # 1. Observe
         observed = await self._observe(intent)
 
+        # ── S-042: Check if a strategy is already in-flight ──────
+        strategy_progress = self._get_strategy_progress(intent)
+        if strategy_progress is not None:
+            await self._continue_strategy(intent, observed, strategy_progress)
+            return
+
+        # ── Delete / scale-to-zero takes priority over strategies ─
+        current_phase = _intent_phase(intent)
+        if current_phase == "deleting" or (
+            current_phase not in ("deleting", "deleted") and intent.replicas == 0
+        ):
+            # Normal delete/scale-to-zero flow via _diff
+            actions = self._diff(intent, observed)
+            if not actions:
+                await self._update_status(intent, observed)
+                return
+            actions.sort(key=lambda a: a.priority)
+            action = actions[0]
+            last_error = None
+            action_succeeded = False
+            try:
+                result = await self._act(intent, action)
+                action_succeeded = True
+                if action.type in (ActionType.CREATE, ActionType.MIGRATE) and result:
+                    await asyncio.sleep(0.5)
+                    observed = await self._observe(intent)
+            except Exception as e:
+                logger.error(
+                    "Action %s failed for intent %s: %s",
+                    action.type,
+                    intent.id,
+                    e,
+                )
+                last_error = {
+                    "code": type(e).__name__,
+                    "message": str(e),
+                    "host_id": action.host_id,
+                    "source_uri": intent.model_source,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
+            if action_succeeded and last_error is None:
+                self._backoff_clear(intent.id)
+            elif last_error is not None:
+                self._backoff_record_failure(intent.id)
+            await self._update_status(intent, observed, last_error=last_error)
+            return
+
         # 2. Diff
         actions = self._diff(intent, observed)
+
+        # ── S-042: Check if a strategy should be initiated ────────
+        strategy_progress_data = self._maybe_initiate_strategy(
+            intent, observed, actions
+        )
+        if strategy_progress_data is not None:
+            # Persist strategy_progress; next tick will execute it
+            await self._update_status(
+                intent, observed, strategy_progress=strategy_progress_data
+            )
+            return
 
         if not actions:
             # No actions needed — still update status to reflect current state
@@ -259,6 +321,154 @@ class Reconciler:
 
         # 4. Update status
         await self._update_status(intent, observed, last_error=last_error)
+
+    # ── S-042: Strategy helpers ──────────────────────────────────
+
+    def _get_strategy_progress(self, intent: Any) -> dict[str, Any] | None:
+        """Extract strategy_progress from intent status, if present."""
+        try:
+            sp = intent.status.strategy_progress
+            if sp is None:
+                return None
+            if hasattr(sp, "model_dump"):
+                return sp.model_dump()
+            if isinstance(sp, dict):
+                return sp
+            return None
+        except (AttributeError, TypeError):
+            return None
+
+    def _maybe_initiate_strategy(
+        self,
+        intent: Any,
+        observed: dict[str, Any],
+        actions: list[Action],
+    ) -> dict[str, Any] | None:
+        """Check if a deployment strategy should be initiated.
+
+        A strategy is needed when:
+        - There are REPLACE actions (model_source drift)
+        - The intent specifies a known strategy (rolling / immediate)
+
+        Returns strategy_progress dict if initiated, None otherwise.
+        """
+        from app.services.strategies import initiate_strategy
+
+        replaces = [a for a in actions if a.type == ActionType.REPLACE]
+        if not replaces:
+            return None
+
+        managed = observed["managed_instances"]
+        candidates = observed["candidates"]
+
+        progress = initiate_strategy(
+            intent=intent,
+            managed_instances=managed,
+            candidates=candidates,
+        )
+        return progress
+
+    async def _continue_strategy(
+        self,
+        intent: Any,
+        observed: dict[str, Any],
+        strategy_progress: dict[str, Any],
+    ) -> None:
+        """Continue an in-flight deployment strategy.
+
+        Drives the strategy state machine: computes the next action,
+        executes it, and updates status with new progress.
+        """
+        from app.config import settings
+        from app.services.strategies import continue_strategy
+
+        managed = observed["managed_instances"]
+        candidates = observed["candidates"]
+        gateway_aliases = observed["gateway_aliases"]
+
+        # Compute health gate elapsed time from strategy start
+        started_at_str = strategy_progress.get("started_at")
+        health_gate_started_at = 0.0
+        if started_at_str:
+            try:
+                started_dt = datetime.fromisoformat(started_at_str)
+                health_gate_started_at = (
+                    datetime.now(timezone.utc) - started_dt
+                ).total_seconds()
+            except (ValueError, TypeError):
+                pass
+
+        timeout = settings.reconcile_health_gate_timeout_s
+
+        # If scale-down requested during strategy, defer it
+        desired = intent.replicas
+        if len(managed) > desired:
+            logger.info(
+                "Scale-down (%d→%d) deferred for intent %s while strategy active",
+                len(managed), desired, intent.id,
+            )
+
+        action_dict, new_progress = continue_strategy(
+            progress_data=strategy_progress,
+            intent=intent,
+            managed_instances=managed,
+            candidates=candidates,
+            gateway_aliases=gateway_aliases,
+            health_gate_started_at=health_gate_started_at,
+            health_gate_timeout_s=timeout,
+        )
+
+        # Execute the action if one is returned
+        last_error = None
+        if action_dict and action_dict.get("type") not in ("wait", "noop"):
+            action_type = action_dict["type"]
+            try:
+                action = Action(
+                    type=(
+                        ActionType.CREATE if action_type == "create"
+                        else ActionType.STOP if action_type == "stop"
+                        else ActionType.NOOP
+                    ),
+                    intent_id=intent.id,
+                    alias=intent.alias,
+                    host_id=action_dict.get("host_id"),
+                    instance_id=action_dict.get("instance_id"),
+                    reason=action_dict.get("reason", ""),
+                    priority=20 if action_type == "create" else 0,
+                )
+                result = await self._act(intent, action)
+
+                # If create succeeded, capture instance_id for progress
+                if action_type == "create" and result and new_progress:
+                    created = result.get("instance", result)
+                    new_progress["current_instance_id"] = (
+                        created.get("id") or created.get("instance_id")
+                    )
+            except Exception as e:
+                logger.error(
+                    "Strategy action %s failed for intent %s: %s",
+                    action_type, intent.id, e,
+                )
+                last_error = {
+                    "code": type(e).__name__,
+                    "message": str(e),
+                    "host_id": action_dict.get("host_id"),
+                    "source_uri": intent.model_source,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
+                if new_progress:
+                    new_progress["failed"] = new_progress.get("failed", 0) + 1
+                    failed_hosts = list(new_progress.get("failed_hosts", []))
+                    if action_dict.get("host_id"):
+                        failed_hosts.append(action_dict["host_id"])
+                    new_progress["failed_hosts"] = failed_hosts
+
+        # Update status with strategy progress
+        await self._update_status(
+            intent, observed,
+            last_error=last_error,
+            strategy_progress=new_progress,
+        )
 
     # ── Observe ────────────────────────────────────────────────
 
@@ -935,10 +1145,13 @@ class Reconciler:
         intent: Any,
         observed: dict[str, Any],
         last_error: dict[str, Any] | None = None,
+        strategy_progress: dict[str, Any] | None = None,
     ) -> None:
         """Compute and persist the intent status after reconciliation.
 
         Implements deployment-intent.md §10.2 status fields.
+        When *strategy_progress* is provided (S-042), it is persisted
+        into the status JSON so strategy state survives restarts.
         """
         from app.database.intents import intent_db
         from app.models.intent import (
@@ -1080,7 +1293,7 @@ class Reconciler:
             "shortfall": structural_shortfall,
             "replica_set": replica_set,
             "conditions": conditions,
-            "strategy_progress": None,
+            "strategy_progress": strategy_progress,
             "last_error": last_error_model.model_dump() if last_error_model else None,
         }
 
