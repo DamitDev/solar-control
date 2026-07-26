@@ -471,6 +471,11 @@ class Reconciler:
                         failed_hosts.append(action_dict["host_id"])
                     new_progress["failed_hosts"] = failed_hosts
 
+        # If strategy reached FAILED state, record backoff so retries
+        # are paced per §11.5 ("Reconciler retries with backoff").
+        if new_progress and new_progress.get("phase") == "failed":
+            self._backoff_record_failure(intent.id)
+
         # Update status with strategy progress
         await self._update_status(
             intent,

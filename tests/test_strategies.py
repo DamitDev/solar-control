@@ -1758,3 +1758,32 @@ class TestEdgeCases:
 
         assert action is None
         assert new_progress is None
+
+    def test_scale_down_during_strategy_continues_normally(self):
+        """When managed > desired (scale-down during strategy), the strategy
+        module operates correctly — excess handling is the reconciler's
+        responsibility (§11.6 scenario 2)."""
+        # 3 managed instances on v1, desired=2 on v2
+        instances = [
+            _make_managed_instance("i1", host_id="h1", model_source="repo://test:v1"),
+            _make_managed_instance("i2", host_id="h2", model_source="repo://test:v1"),
+            _make_managed_instance("i3", host_id="h3", model_source="repo://test:v1"),
+        ]
+        candidates = _make_candidates("h4", "h5")
+
+        # Rolling init: despite scale-down (3→2), strategy initiates for
+        # model version change (all 3 need replacing).
+        result = RollingStrategy.init(
+            intent_id="intent-001",
+            alias="test-model",
+            target_model_source="repo://test:v2",
+            desired_replicas=2,
+            managed_instances=instances,
+            candidates=candidates,
+        )
+        assert result is not None
+        assert result["phase"] == StrategyPhase.CREATING_REPLACEMENT
+        assert result["updated"] == 0  # none on target
+        # Strategy processes the first replacement on available host
+        assert result["current_host_id"] is not None
+        assert result["step"] == "1/2"  # needed=2 despite 3 managed
