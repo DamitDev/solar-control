@@ -367,8 +367,28 @@ class Reconciler:
         displaceable_map: dict[str, list[dict[str, Any]]] = {}
         intent_priority = intent.priority
         candidate_host_ids = {h.id for h, _ in candidates}
+        # Pre-collect hosts with active training jobs (non-displaceable per §8.5)
+        hosts_with_active_jobs: set[str] = set()
+        try:
+            from app.database.jobs import job_db
+            from app.models.job import JobStatus
+
+            for host in hosts:
+                jobs = await job_db.get_jobs_by_host(host.id)
+                if any(
+                    j.status in (JobStatus.PENDING, JobStatus.RUNNING) for j in jobs
+                ):
+                    hosts_with_active_jobs.add(host.id)
+        except Exception:
+            logger.warning(
+                "Failed to query active training jobs for displacement pre-filter",
+                exc_info=True,
+            )
         for host in hosts:
             if host.id in candidate_host_ids or host.status != "online":
+                continue
+            # Skip hosts with active training jobs (§8.5)
+            if host.id in hosts_with_active_jobs:
                 continue
             # Check if host has right roles/GPU (basic pre-filter)
             host_roles = host.roles or []
@@ -1003,6 +1023,29 @@ class Reconciler:
             last_reconciled_at=now,
             ready_at=ready_at,
         )
+
+        # ── Emit Socket.IO events for live WebUI updates (§10.4) ──
+        try:
+            from app.socketio_app import sio
+
+            # Fetch the updated intent so the event carries the full record
+            updated = await intent_db.get_intent(intent.id)
+            if updated:
+                await sio.emit(
+                    "intent_update",
+                    updated.model_dump(),
+                    namespace="/webui",
+                )
+                if phase == IntentPhase.DELETED:
+                    await sio.emit(
+                        "intent_removed",
+                        {"id": intent.id, "alias": intent.alias},
+                        namespace="/webui",
+                    )
+        except Exception:
+            logger.warning(
+                "Failed to emit intent_update event for %s", intent.id, exc_info=True
+            )
 
 
 # ── Helpers ────────────────────────────────────────────────────
