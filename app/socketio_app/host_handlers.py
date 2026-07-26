@@ -191,6 +191,10 @@ async def host_connect(
         )
 
         await _emit_host_status(host, connected=True)
+        # Wake reconciler — a new host may provide capacity for pending intents
+        from app.services.reconciliation import reconciler
+
+        reconciler.wake()
     else:
         pending_id = str(uuid.uuid4())
         pending_data: dict[str, Any] = {
@@ -239,6 +243,10 @@ async def host_disconnect(sid: str):
 
         if host:
             await _emit_host_status(host, connected=False)
+        # Wake reconciler — lost host may leave intents under-replicated
+        from app.services.reconciliation import reconciler
+
+        reconciler.wake()
         return
 
     pending_id = await host_store.remove_pending_by_sid(sid)

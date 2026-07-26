@@ -64,6 +64,10 @@ async def create_intent(request: Request, body: IntentCreate) -> IntentResponse:
     )
 
     logger.info("Intent created: id=%s alias=%s", intent.id, intent.alias)
+    # Wake reconciler to process the new intent immediately
+    from app.services.reconciliation import reconciler
+
+    reconciler.wake()
     return intent
 
 
@@ -117,6 +121,10 @@ async def delete_intent(
     logger.info(
         "Intent deleted: id=%s alias=%s orphan=%s", intent_id, intent.alias, orphan
     )
+    # Wake reconciler to process the deletion immediately
+    from app.services.reconciliation import reconciler
+
+    reconciler.wake()
     return IntentDeletedResponse(
         id=intent.id,
         alias=intent.alias,
