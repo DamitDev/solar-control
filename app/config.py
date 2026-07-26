@@ -52,5 +52,10 @@ class Settings(BaseSettings):
     # Reconciliation (S-041)
     reconcile_interval_s: float = 10.0
 
+    # Strategy health gate timeout (S-042)
+    # Maximum seconds to wait for a replacement instance to become healthy
+    # before the rolling strategy holds and reports failure.
+    reconcile_health_gate_timeout_s: float = 120.0
+
 
 settings = Settings()

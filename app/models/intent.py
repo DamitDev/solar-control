@@ -108,14 +108,27 @@ class Condition(BaseModel):
 
 
 class StrategyProgress(BaseModel):
-    """In-flight strategy progress (S-039 §11.4)."""
+    """In-flight strategy progress (S-039 §11.4, extended for S-042 state machine).
+
+    Persisted in intent status_json so strategy state survives reconciler
+    restarts.  The ``phase`` field drives the strategy state machine;
+    ``current_host_id`` / ``current_instance_id`` track which replacement
+    is in flight; ``pending_hosts`` / ``failed_hosts`` track remaining
+    and failed hosts across ticks.
+    """
 
     strategy: str
     target_model_source: str | None = None
+    phase: str | None = None
     step: str | None = None
     updated: int = 0
     in_progress: int = 0
     failed: int = 0
+    current_host_id: str | None = None
+    current_instance_id: str | None = None
+    pending_hosts: list[str] = Field(default_factory=list)
+    failed_hosts: list[str] = Field(default_factory=list)
+    started_at: str | None = None
     message: str | None = None
 
 
