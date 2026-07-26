@@ -59,6 +59,12 @@ async def lifespan(app: FastAPI):
     # Start gateway background tasks (registry refresh + health probes)
     await gateway.start_background_tasks()
 
+    # Start reconciliation engine (S-041)
+    from app.services.reconciliation import reconciler
+
+    await reconciler.start()
+    logger.info("Reconciliation engine started")
+
     logger.info("Solar Control started successfully")
 
     yield
@@ -74,6 +80,11 @@ async def lifespan(app: FastAPI):
         await gateway_logger.stop()
     except Exception as e:
         logger.error("Error stopping gateway logger: %s", e)
+
+    try:
+        await reconciler.stop()
+    except Exception as e:
+        logger.error("Error stopping reconciler: %s", e)
 
     await close_redis()
     await close_db()
