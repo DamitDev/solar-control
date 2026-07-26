@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 
 from app.models.intent import (
     IntentPhase,
@@ -171,6 +171,29 @@ class IntentDB:
             await session.refresh(row)
             return self._row_to_response(row)
 
+    async def list_active_for_reconciliation(self) -> list[IntentResponse]:
+        """List all non-deleted intents, ordered by priority for reconciliation.
+
+        Higher-priority intents (production) are reconciled first so they
+        can claim capacity before lower-priority intents.
+        """
+        async with self._session() as session:
+            stmt = (
+                select(IntentRow)
+                .where(IntentRow.deleted_at.is_(None))
+                .order_by(
+                    case(
+                        (IntentRow.priority == "production", 0),
+                        (IntentRow.priority == "staging", 1),
+                        (IntentRow.priority == "ephemeral", 2),
+                        else_=3,
+                    ),
+                    IntentRow.created_at.asc(),
+                )
+            )
+            result = await session.execute(stmt)
+            return [self._row_to_response(row) for row in result.scalars()]
+
     async def check_alias_conflict(
         self, alias: str, *, exclude_id: str | None = None
     ) -> bool:
@@ -187,6 +210,44 @@ class IntentDB:
             if exclude_id and str(row.id) == exclude_id:
                 return False
             return True
+
+    async def update_status(
+        self,
+        intent_id: str,
+        *,
+        phase: str | None = None,
+        reconcile: str | None = None,
+        status_json: dict[str, Any] | None = None,
+        last_reconciled_at: datetime | None = None,
+        ready_at: datetime | str | None = None,
+    ) -> IntentResponse | None:
+        """Update an intent's status fields atomically.
+
+        Only the provided non-None kwargs are written; all others are
+        left unchanged.  Returns the updated intent or None if the
+        intent is deleted/unknown.
+        """
+        now = datetime.now(timezone.utc)
+        async with self._session() as session:
+            row = await session.get(IntentRow, intent_id)
+            if row is None or row.deleted_at is not None:
+                return None
+            if phase is not None:
+                row.phase = phase
+            if reconcile is not None:
+                row.reconcile = reconcile
+            if status_json is not None:
+                row.status_json = status_json
+            if last_reconciled_at is not None:
+                row.last_reconciled_at = last_reconciled_at
+            if ready_at is not None:
+                if isinstance(ready_at, str):
+                    ready_at = datetime.fromisoformat(ready_at)
+                row.ready_at = ready_at
+            row.updated_at = now
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_response(row)
 
 
 intent_db = IntentDB()
