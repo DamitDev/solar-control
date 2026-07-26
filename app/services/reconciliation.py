@@ -405,7 +405,9 @@ class Reconciler:
         if len(managed) > desired:
             logger.info(
                 "Scale-down (%d→%d) deferred for intent %s while strategy active",
-                len(managed), desired, intent.id,
+                len(managed),
+                desired,
+                intent.id,
             )
 
         action_dict, new_progress = continue_strategy(
@@ -425,9 +427,13 @@ class Reconciler:
             try:
                 action = Action(
                     type=(
-                        ActionType.CREATE if action_type == "create"
-                        else ActionType.STOP if action_type == "stop"
-                        else ActionType.NOOP
+                        ActionType.CREATE
+                        if action_type == "create"
+                        else (
+                            ActionType.STOP
+                            if action_type == "stop"
+                            else ActionType.NOOP
+                        )
                     ),
                     intent_id=intent.id,
                     alias=intent.alias,
@@ -441,13 +447,15 @@ class Reconciler:
                 # If create succeeded, capture instance_id for progress
                 if action_type == "create" and result and new_progress:
                     created = result.get("instance", result)
-                    new_progress["current_instance_id"] = (
-                        created.get("id") or created.get("instance_id")
-                    )
+                    new_progress["current_instance_id"] = created.get(
+                        "id"
+                    ) or created.get("instance_id")
             except Exception as e:
                 logger.error(
                     "Strategy action %s failed for intent %s: %s",
-                    action_type, intent.id, e,
+                    action_type,
+                    intent.id,
+                    e,
                 )
                 last_error = {
                     "code": type(e).__name__,
@@ -465,7 +473,8 @@ class Reconciler:
 
         # Update status with strategy progress
         await self._update_status(
-            intent, observed,
+            intent,
+            observed,
             last_error=last_error,
             strategy_progress=new_progress,
         )

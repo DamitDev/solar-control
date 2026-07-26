@@ -18,7 +18,6 @@ Health gate (shared, per §11.1):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -200,10 +199,7 @@ class RollingStrategy:
         # Replacement hosts: from candidates, exclude hosts already hosting
         # a managed instance (to enforce one-replica-per-host during
         # replacement — the old instance will be retired first).
-        candidate_hosts = [
-            h for h, _ in candidates
-            if h.id not in drifted_host_ids
-        ]
+        candidate_hosts = [h for h, _ in candidates if h.id not in drifted_host_ids]
 
         # If we have drifted instances, we can also replace in-place:
         # stop old, then create new on same host (candidate hosts list
@@ -299,8 +295,7 @@ class RollingStrategy:
                     "type": "create",
                     "host_id": current_host_id,
                     "reason": (
-                        f"Rolling replacement step "
-                        f"{progress_data.get('step', '?')}"
+                        f"Rolling replacement step " f"{progress_data.get('step', '?')}"
                     ),
                 },
                 progress_data,  # unchanged; _continue_strategy sets instance_id
@@ -344,8 +339,12 @@ class RollingStrategy:
                     # No old instance — this was a pure scale-up add on a
                     # new host.  Advance to next slot.
                     return _advance_to_next_rolling(
-                        progress_data, managed_instances, candidates,
-                        desired_replicas, alias, target_source,
+                        progress_data,
+                        managed_instances,
+                        candidates,
+                        desired_replicas,
+                        alias,
+                        target_source,
                     )
 
             # Check timeout
@@ -383,8 +382,12 @@ class RollingStrategy:
 
             # Old replica gone → advance to next slot
             return _advance_to_next_rolling(
-                progress_data, managed_instances, candidates,
-                desired_replicas, alias, target_source,
+                progress_data,
+                managed_instances,
+                candidates,
+                desired_replicas,
+                alias,
+                target_source,
             )
 
         # ── Unknown phase ────────────────────────────────────────
@@ -421,13 +424,8 @@ def _advance_to_next_rolling(
         if remaining <= 0:
             return None, None
         # Try to find additional candidates
-        current_host_ids = {
-            inst.get("_host_id") for inst in managed_instances
-        }
-        extra_candidates = [
-            h.id for h, _ in candidates
-            if h.id not in current_host_ids
-        ]
+        current_host_ids = {inst.get("_host_id") for inst in managed_instances}
+        extra_candidates = [h.id for h, _ in candidates if h.id not in current_host_ids]
         pending = extra_candidates[:remaining]
 
     if not pending:
@@ -494,17 +492,15 @@ class ImmediateStrategy:
 
         # All managed instances with old source need stopping
         drifted = [
-            inst for inst in managed_instances
+            inst
+            for inst in managed_instances
             if (inst.get("config", inst).get("model_source") != target_model_source)
         ]
 
         # Replacement host candidates
-        current_host_ids = {
-            inst.get("_host_id") for inst in managed_instances
-        }
+        current_host_ids = {inst.get("_host_id") for inst in managed_instances}
         replacement_hosts = [
-            h.id for h, _ in candidates
-            if h.id not in current_host_ids
+            h.id for h, _ in candidates if h.id not in current_host_ids
         ]
 
         total_steps = max(len(drifted), needed)
@@ -551,13 +547,13 @@ class ImmediateStrategy:
                     inst_id = inst.get("instance_id") or inst.get("id")
                     host_id = inst.get("_host_id")
                     remaining = sum(
-                        1 for m in managed_instances
+                        1
+                        for m in managed_instances
                         if (m.get("config", m).get("model_source") != target_source)
                     )
                     new_progress = dict(progress_data)
                     new_progress["message"] = (
-                        f"Stopping old replica on {host_id} "
-                        f"({remaining} remaining)"
+                        f"Stopping old replica on {host_id} " f"({remaining} remaining)"
                     )
                     return (
                         {
@@ -576,17 +572,15 @@ class ImmediateStrategy:
                 return None, None  # Nothing left to do
 
             # Refresh replacement hosts
-            current_host_ids = {
-                inst.get("_host_id") for inst in managed_instances
-            }
+            current_host_ids = {inst.get("_host_id") for inst in managed_instances}
             # Also include candidate hosts from the pending_hosts list
             # that were saved during init
             pending_from_init = list(progress_data.get("pending_hosts", []))
             # Plus new candidates not in current set
             new_candidates = [
-                h.id for h, _ in candidates
-                if h.id not in current_host_ids
-                and h.id not in pending_from_init
+                h.id
+                for h, _ in candidates
+                if h.id not in current_host_ids and h.id not in pending_from_init
             ]
             all_pending = pending_from_init + new_candidates
 
@@ -600,9 +594,7 @@ class ImmediateStrategy:
             new_progress["phase"] = StrategyPhase.CREATING_REPLACEMENTS
             new_progress["pending_hosts"] = all_pending[:needed]
             new_progress["in_progress"] = needed
-            new_progress["message"] = (
-                f"Creating {needed} replacement replica(s)"
-            )
+            new_progress["message"] = f"Creating {needed} replacement replica(s)"
             return {"type": "wait", "reason": "transitioning"}, new_progress
 
         # ── PHASE: creating_replacements ─────────────────────────
