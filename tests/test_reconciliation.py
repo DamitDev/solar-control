@@ -394,7 +394,11 @@ class TestBuildInstanceConfig:
     """Test _build_instance_config method."""
 
     def test_maps_fields_correctly(self):
-        """Config contains alias, model_source, priority, managed_by, intent_id."""
+        """Top-level: managed_by, intent_id, priority. Config: alias, source, backend.
+
+        Per deployment-intent.md §6, managed_by/intent_id/priority are top-level
+        fields on the Instance model, not nested inside config.
+        """
         reconciler = Reconciler()
         intent = _make_intent(
             alias="iris-osl:110m",
@@ -407,15 +411,23 @@ class TestBuildInstanceConfig:
             },
         )
         host = _HostStub(id="h1")
-        config = reconciler._build_instance_config(intent, host)
+        payload = reconciler._build_instance_config(intent, host)
 
-        assert config["config"]["alias"] == "iris-osl:110m"
-        assert config["config"]["model_source"] == "repo://iris-osl:v3"
-        assert config["config"]["priority"] == "production"
-        assert config["config"]["managed_by"] == "intent"
-        assert config["config"]["intent_id"] == "intent-001"
-        assert config["config"]["max_length"] == 512
-        assert config["config"]["backend_type"] == "huggingface_classification"
+        # Top-level fields
+        assert payload["managed_by"] == "intent"
+        assert payload["intent_id"] == "intent-001"
+        assert payload["priority"] == "production"
+
+        # Config fields
+        assert payload["config"]["alias"] == "iris-osl:110m"
+        assert payload["config"]["model_source"] == "repo://iris-osl:v3"
+        assert payload["config"]["max_length"] == 512
+        assert payload["config"]["backend_type"] == "huggingface_classification"
+
+        # NOT inside config
+        assert "managed_by" not in payload["config"]
+        assert "intent_id" not in payload["config"]
+        assert "priority" not in payload["config"]
 
     def test_copies_backend_runtime_params(self):
         """Backend params are copied to config, backend_type included."""

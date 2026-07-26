@@ -714,6 +714,13 @@ class Reconciler:
                 action.reason,
             )
             result = await create_instance_on_host(host, instance_config)
+            # The host wraps the response in {"instance": {...}};
+            # extract the instance and start it (host creates in stopped state).
+            created = result.get("instance", result)
+            instance_id = created.get("id") or created.get("instance_id")
+            if instance_id:
+                logger.info("Starting instance %s on %s", instance_id, host.name)
+                await self._start_instance(host, instance_id)
             return result
 
         if action.type == ActionType.REPLACE:
@@ -817,6 +824,38 @@ class Reconciler:
 
         return None
 
+    # ── Start instance ──────────────────────────────────────────
+
+    async def _start_instance(self, host: Any, instance_id: str) -> None:
+        """Start a stopped instance on *host* via POST /instances/{id}/start."""
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{host.url.rstrip('/')}/instances/{instance_id}/start"
+                headers = {"X-API-Key": host.api_key}
+                async with session.post(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        logger.warning(
+                            "Failed to start instance %s on %s: HTTP %s %s",
+                            instance_id,
+                            host.name,
+                            resp.status,
+                            text,
+                        )
+        except Exception as e:
+            logger.warning(
+                "Failed to start instance %s on %s: %s",
+                instance_id,
+                host.name,
+                e,
+            )
+
     # ── Build instance config ──────────────────────────────────
 
     def _build_instance_config(self, intent: Any, host: Any) -> dict[str, Any]:
@@ -824,14 +863,14 @@ class Reconciler:
 
         Implements deployment-intent.md §6 mapping: alias, model_source,
         priority, managed_by, intent_id, plus backend runtime params.
+
+        The host expects ``managed_by``, ``intent_id``, and ``priority``
+        at the TOP LEVEL (outside ``config``), matching the Instance model.
         """
         config: dict[str, Any] = {
             "backend_type": intent.backend.get("backend_type", "llamacpp"),
             "alias": intent.alias,
             "model_source": intent.model_source,
-            "priority": intent.priority,
-            "managed_by": "intent",
-            "intent_id": intent.id,
         }
 
         # Copy backend runtime params, excluding backend_type (already set)
@@ -840,7 +879,12 @@ class Reconciler:
                 continue
             config[key] = value
 
-        return {"config": config}
+        return {
+            "config": config,
+            "managed_by": "intent",
+            "intent_id": intent.id,
+            "priority": intent.priority,
+        }
 
     # ── Update status ──────────────────────────────────────────
 
