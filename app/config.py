@@ -49,7 +49,6 @@ class Settings(BaseSettings):
     job_step_image_registry: str = ""
     job_step_image_tag: str = "latest"
 
-
     # Reconciliation (S-041)
     reconcile_interval_s: float = 10.0
 

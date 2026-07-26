@@ -134,16 +134,12 @@ class Reconciler:
             r = redis_client()
             acquired = await r.set(lock_key, "1", nx=True, ex=_LOCK_TTL)
             if not acquired:
-                logger.debug(
-                    "Intent %s locked by another replica, skipping", intent.id
-                )
+                logger.debug("Intent %s locked by another replica, skipping", intent.id)
                 continue
             try:
                 await self._reconcile_one(intent)
             except Exception:
-                logger.exception(
-                    "Reconciliation failed for intent %s", intent.id
-                )
+                logger.exception("Reconciliation failed for intent %s", intent.id)
             finally:
                 await r.delete(lock_key)
 
@@ -418,6 +414,8 @@ class Reconciler:
                         )
                     )
 
+        # Sort by priority so stops execute before creates
+        actions.sort(key=lambda a: a.priority)
         return actions
 
     # ── Act ────────────────────────────────────────────────────
@@ -445,9 +443,7 @@ class Reconciler:
                 return None
             host = await host_db.get_host(action.host_id)
             if host is None:
-                logger.warning(
-                    "Host %s not found for stop action", action.host_id
-                )
+                logger.warning("Host %s not found for stop action", action.host_id)
                 return None
             logger.info(
                 "Stopping instance %s on %s (reason: %s)",
@@ -463,9 +459,7 @@ class Reconciler:
                 return None
             host = await host_db.get_host(action.host_id)
             if host is None:
-                logger.warning(
-                    "Host %s not found for create action", action.host_id
-                )
+                logger.warning("Host %s not found for create action", action.host_id)
                 return None
 
             instance_config = self._build_instance_config(intent, host)
