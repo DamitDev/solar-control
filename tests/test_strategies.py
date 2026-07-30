@@ -10,7 +10,6 @@ Tests cover:
 
 from dataclasses import dataclass
 
-
 from app.services.strategies import (
     ImmediateStrategy,
     RollingStrategy,
@@ -435,6 +434,8 @@ class TestRollingModelVersionChange:
         assert action == {"type": "wait", "reason": "awaiting health"}
         assert new_progress["phase"] == StrategyPhase.WAITING_HEALTHY
         assert "Waiting for replacement" in new_progress["message"]
+        assert "step_started_at" in new_progress
+        assert new_progress["step_started_at"] is not None
 
     # ── Phase: waiting_healthy → retiring_old ──────────────────
 

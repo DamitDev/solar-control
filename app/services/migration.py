@@ -29,9 +29,9 @@ import aiohttp
 from fastapi import HTTPException
 
 from app.database.hosts import host_db
+from app.model_resolvers import resolve
 from app.models import Host
 from app.models.migration import MigrationResult, MigrationStep
-from app.model_resolvers import resolve
 from app.redis_state import host_store
 from app.validation import validate_priority
 
@@ -99,7 +99,7 @@ async def create_instance_on_host(
             status_code=502,
             detail=f"Host '{host.name}' is unreachable at {host.url}",
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Cannot reach host '{host.name}': {e}",
@@ -172,7 +172,7 @@ async def capture_instance_config(
                 f"at {source_host.url}"
             ),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Cannot reach source host '{source_host.name}': {e}",
@@ -251,15 +251,18 @@ async def validate_target_fitness(
     # portable across GPU architectures and the model is pulled fresh
     # on the target host via S-019 distribution.  Placement constraints
     # (deployment-intent §4.5) default gpu_type to null (any).
-    if source_gpu_type and target_host.gpu_type:
-        if source_gpu_type != target_host.gpu_type:
-            logger.info(
-                "GPU type differs — source '%s' (%s) → target '%s' (%s)",
-                source_gpu_type,
-                source_gpu_type,
-                target_host.name,
-                target_host.gpu_type,
-            )
+    if (
+        source_gpu_type
+        and target_host.gpu_type
+        and source_gpu_type != target_host.gpu_type
+    ):
+        logger.info(
+            "GPU type differs — source '%s' (%s) → target '%s' (%s)",
+            source_gpu_type,
+            source_gpu_type,
+            target_host.name,
+            target_host.gpu_type,
+        )
 
     # Resource check via /health (disk + VRAM)
     MIN_VRAM_GB = 2.0
@@ -303,7 +306,7 @@ async def validate_target_fitness(
                             break
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             "Failed to check resources on target host %s: %s",
             target_host.id,
@@ -413,7 +416,7 @@ async def check_no_active_training(host: Host) -> None:
                 f"– migration rejected."
             ),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=(
@@ -459,10 +462,46 @@ async def stop_source_instance(source_host: Host, instance_id: str) -> dict[str,
                 f"at {source_host.url}"
             ),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Cannot reach source host '{source_host.name}': {e}",
+        )
+
+
+async def _delete_instance(host: Host, instance_id: str) -> dict[str, Any]:
+    """Delete *instance_id* from *host* via DELETE /instances/{id}.
+
+    Returns the host response on success. Raises HTTPException on failure.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{host.url}/instances/{instance_id}"
+            headers = {"X-API-Key": host.api_key}
+            async with session.delete(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                text = await response.text()
+                raise HTTPException(status_code=response.status, detail=text)
+    except HTTPException:
+        raise
+    except (
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientConnectorError,
+        asyncio.TimeoutError,
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=(f"Host '{host.name}' is unreachable " f"at {host.url}"),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot reach host '{host.name}': {e}",
         )
 
 
@@ -671,11 +710,38 @@ async def execute_migration(
             error=f"Stop source failed: {e.detail}",
         )
 
+    # ── 6.5. Delete source instance ──────────────────────────────
+    try:
+        await _delete_instance(source_host, instance_id)
+        steps.append(MigrationStep(step="delete_source", status="ok"))
+    except HTTPException as e:
+        steps.append(
+            MigrationStep(
+                step="delete_source",
+                status="failed",
+                detail={"error": str(e.detail), "status_code": e.status_code},
+            )
+        )
+        return _build_result(
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            None,
+            steps,
+            status="failed",
+            error=f"Delete source failed: {e.detail}",
+        )
+
     # ── 7. Create target instance ───────────────────────────────
     # Build the instance config for the target host.
     config = instance_config.get("config", instance_config)
 
     # Remove host-assigned and instance-level fields from the config dict.
+    # managed_by and intent_id are ownership markers that survive migration.
     _INSTANCE_FIELDS = frozenset(
         {
             "id",
@@ -684,8 +750,6 @@ async def execute_migration(
             "pid",
             "api_key",
             "supported_endpoints",
-            "managed_by",
-            "intent_id",
             "created_at",
             "started_at",
             "error_message",
@@ -701,8 +765,9 @@ async def execute_migration(
     # Set model to the path resolved by ensure_model_on_target so the
     # host does not need to resolve model_source itself (which would
     # reject repo:// URIs without the companion host-side fix).
+    # Preserve model_source alongside the resolved path for intent
+    # linking and cross-host operations (S-037/D-017).
     create_payload["model"] = path
-    create_payload.pop("model_source", None)
     # Ensure key fields from captured config are present.
     for key in ("alias", "priority", "backend_type"):
         if key not in create_payload:
@@ -737,9 +802,9 @@ async def execute_migration(
             error=f"Create target failed: {e.detail}",
         )
 
-    target_instance_id = target_instance.get("instance_id") or target_instance.get(
-        "id", ""
-    )
+    # The host wraps created instances in {"instance": {...}, "message": "..."}
+    created = target_instance.get("instance", target_instance)
+    target_instance_id = created.get("id") or created.get("instance_id") or ""
     steps.append(
         MigrationStep(
             step="create_target",

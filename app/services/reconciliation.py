@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from fastapi import HTTPException
+
 from app.config import settings
 from app.redis_state.connection import redis_client
 
@@ -236,7 +238,7 @@ class Reconciler:
                 if action.type in (ActionType.CREATE, ActionType.MIGRATE) and result:
                     await asyncio.sleep(0.5)
                     observed = await self._observe(intent)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.error(
                     "Action %s failed for intent %s: %s",
                     action.type,
@@ -298,7 +300,7 @@ class Reconciler:
             if action.type in (ActionType.CREATE, ActionType.MIGRATE) and result:
                 await asyncio.sleep(0.5)
                 observed = await self._observe(intent)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(
                 "Action %s failed for intent %s: %s",
                 action.type,
@@ -386,14 +388,18 @@ class Reconciler:
         candidates = observed["candidates"]
         gateway_aliases = observed["gateway_aliases"]
 
-        # Compute health gate elapsed time from strategy start
-        started_at_str = strategy_progress.get("started_at")
+        # Compute health gate elapsed time from the current step start
+        # (per §11.1 each replacement step has its own timeout window).
+        # Fall back to overall strategy started_at for backward compat.
+        step_started_at_str = strategy_progress.get(
+            "step_started_at"
+        ) or strategy_progress.get("started_at")
         health_gate_started_at = 0.0
-        if started_at_str:
+        if step_started_at_str:
             try:
-                started_dt = datetime.fromisoformat(started_at_str)
+                step_started_dt = datetime.fromisoformat(step_started_at_str)
                 health_gate_started_at = (
-                    datetime.now(timezone.utc) - started_dt
+                    datetime.now(timezone.utc) - step_started_dt
                 ).total_seconds()
             except (ValueError, TypeError):
                 pass
@@ -450,7 +456,7 @@ class Reconciler:
                     new_progress["current_instance_id"] = created.get(
                         "id"
                     ) or created.get("instance_id")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.error(
                     "Strategy action %s failed for intent %s: %s",
                     action_type,
@@ -745,22 +751,21 @@ class Reconciler:
 
             # Check if instance failed/stopped unexpectedly
             status = inst.get("status") or inst.get("state", "")
-            if status in ("failed", "stopped", "error"):
-                if not any(
-                    a.instance_id == inst_id and a.type == ActionType.REPLACE
-                    for a in actions
-                ):
-                    actions.append(
-                        Action(
-                            type=ActionType.RECREATE,
-                            intent_id=intent.id,
-                            alias=intent.alias,
-                            host_id=inst.get("_host_id"),
-                            instance_id=inst_id,
-                            reason=f"Instance {status}, recreating",
-                            priority=15,
-                        )
+            if status in ("failed", "stopped", "error") and not any(
+                a.instance_id == inst_id and a.type == ActionType.REPLACE
+                for a in actions
+            ):
+                actions.append(
+                    Action(
+                        type=ActionType.RECREATE,
+                        intent_id=intent.id,
+                        alias=intent.alias,
+                        host_id=inst.get("_host_id"),
+                        instance_id=inst_id,
+                        reason=f"Instance {status}, recreating",
+                        priority=15,
                     )
+                )
 
         # ── Observed < Desired → CREATE (placement policy) ───────
         shortfall = desired - observed_count
@@ -989,9 +994,9 @@ class Reconciler:
             # Migrate = use S-037 to move instance off this host, freeing capacity
             if not action.instance_id or not action.host_id:
                 return None
-            from app.services.placement import find_candidates
-            from app.services.migration import execute_migration
             from app.routes.management.resources import _fetch_host_resource_snapshot
+            from app.services.migration import execute_migration
+            from app.services.placement import find_candidates
 
             # Look up the source host to inherit its GPU type and roles as
             # placement constraints for the migration target (§8.5: move to
@@ -1063,7 +1068,10 @@ class Reconciler:
     # ── Start / Delete instance helpers ────────────────────────
 
     async def _start_instance(self, host: Any, instance_id: str) -> None:
-        """Start a stopped instance on *host* via POST /instances/{id}/start."""
+        """Start a stopped instance on *host* via POST /instances/{id}/start.
+
+        Raises HTTPException on failure so the reconciler records last_error.
+        """
         import aiohttp
 
         try:
@@ -1075,21 +1083,25 @@ class Reconciler:
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        logger.warning(
-                            "Failed to start instance %s on %s: HTTP %s %s",
-                            instance_id,
-                            host.name,
-                            resp.status,
-                            text,
-                        )
-        except Exception as e:
-            logger.warning(
-                "Failed to start instance %s on %s: %s",
-                instance_id,
-                host.name,
-                e,
+                    if resp.status == 200:
+                        return
+                    text = await resp.text()
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"Host '{host.name}' failed to start instance "
+                            f"{instance_id}: HTTP {resp.status} — {text}"
+                        ),
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Host '{host.name}' unreachable during instance start "
+                    f"for {instance_id}: {e}"
+                ),
             )
 
     async def _delete_instance(self, host: Any, instance_id: str) -> None:
@@ -1114,7 +1126,7 @@ class Reconciler:
                             resp.status,
                             text,
                         )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Failed to delete instance %s on %s: %s",
                 instance_id,
@@ -1221,9 +1233,12 @@ class Reconciler:
                 phase = IntentPhase.DELETED
             else:
                 phase = IntentPhase.DELETING
-        elif desired == 0 and observed_count == 0:
-            phase = IntentPhase.READY
-        elif ready_count == desired and desired > 0:
+        elif (
+            desired == 0
+            and observed_count == 0
+            or ready_count == desired
+            and desired > 0
+        ):
             phase = IntentPhase.READY
         elif ready_count == 0 and desired > 0 and observed_count == 0:
             phase = IntentPhase.RECONCILING

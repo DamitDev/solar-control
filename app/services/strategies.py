@@ -283,6 +283,7 @@ class RollingStrategy:
             if current_instance_id:
                 new_progress = dict(progress_data)
                 new_progress["phase"] = StrategyPhase.WAITING_HEALTHY
+                new_progress["step_started_at"] = datetime.now(timezone.utc).isoformat()
                 new_progress["message"] = (
                     f"Waiting for replacement on {current_host_id} "
                     f"to become healthy"
