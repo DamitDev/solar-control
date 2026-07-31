@@ -469,42 +469,6 @@ async def stop_source_instance(source_host: Host, instance_id: str) -> dict[str,
         )
 
 
-async def _delete_instance(host: Host, instance_id: str) -> dict[str, Any]:
-    """Delete *instance_id* from *host* via DELETE /instances/{id}.
-
-    Returns the host response on success. Raises HTTPException on failure.
-    """
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{host.url}/instances/{instance_id}"
-            headers = {"X-API-Key": host.api_key}
-            async with session.delete(
-                url,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                text = await response.text()
-                raise HTTPException(status_code=response.status, detail=text)
-    except HTTPException:
-        raise
-    except (
-        aiohttp.ClientConnectionError,
-        aiohttp.ClientConnectorError,
-        asyncio.TimeoutError,
-    ):
-        raise HTTPException(
-            status_code=502,
-            detail=(f"Host '{host.name}' is unreachable " f"at {host.url}"),
-        )
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(
-            status_code=502,
-            detail=f"Cannot reach host '{host.name}': {e}",
-        )
-
-
 # ── Orchestrator ────────────────────────────────────────────────
 
 
@@ -710,32 +674,6 @@ async def execute_migration(
             error=f"Stop source failed: {e.detail}",
         )
 
-    # ── 6.5. Delete source instance ──────────────────────────────
-    try:
-        await _delete_instance(source_host, instance_id)
-        steps.append(MigrationStep(step="delete_source", status="ok"))
-    except HTTPException as e:
-        steps.append(
-            MigrationStep(
-                step="delete_source",
-                status="failed",
-                detail={"error": str(e.detail), "status_code": e.status_code},
-            )
-        )
-        return _build_result(
-            migration_id,
-            source_host,
-            target_host,
-            instance_id,
-            alias,
-            model_source,
-            priority,
-            None,
-            steps,
-            status="failed",
-            error=f"Delete source failed: {e.detail}",
-        )
-
     # ── 7. Create target instance ───────────────────────────────
     # Build the instance config for the target host.
     config = instance_config.get("config", instance_config)
@@ -777,9 +715,12 @@ async def execute_migration(
 
     target_instance: dict[str, Any]
     try:
-        target_instance = await create_instance_on_host(
-            target_host, {"config": create_payload}
-        )
+        create_wrapper: dict[str, Any] = {"config": create_payload}
+        # Preserve ownership markers from the source instance (S-037/D-017 G3)
+        for field in ("managed_by", "intent_id"):
+            if instance_config.get(field):
+                create_wrapper[field] = instance_config[field]
+        target_instance = await create_instance_on_host(target_host, create_wrapper)
     except HTTPException as e:
         steps.append(
             MigrationStep(

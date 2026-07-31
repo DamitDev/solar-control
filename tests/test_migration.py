@@ -388,7 +388,6 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         patch("app.services.migration.check_no_active_training") as mock_train_check,
         patch("app.services.migration.ensure_model_on_target") as mock_ensure,
         patch("app.services.migration.stop_source_instance") as mock_stop,
-        patch("app.services.migration._delete_instance") as mock_delete,
         patch("app.services.migration.create_instance_on_host") as mock_create,
         patch("aiohttp.ClientSession.get") as mock_get,
     ):
@@ -418,7 +417,6 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
             True,
         )
         mock_stop.return_value = {"status": "stopped"}
-        mock_delete.return_value = {"status": "deleted"}
         mock_create.return_value = {
             "instance": {"id": "new-inst", "status": "stopped"},
             "message": "created",
@@ -437,8 +435,8 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         assert result.target_host_id == "host-tgt"
         assert result.target_instance_id == "new-inst"
 
-        # All 9 steps should be ok (added delete_source)
-        assert len(result.steps) == 9
+        # All 8 steps should be ok
+        assert len(result.steps) == 8
         for step in result.steps:
             assert step.status == "ok", f"Step '{step.step}' failed"
 
@@ -634,7 +632,6 @@ async def test_migrate_create_target_fails(source_host, target_host, instance_co
         patch("app.services.migration.check_no_active_training") as mock_train_check,
         patch("app.services.migration.ensure_model_on_target") as mock_ensure,
         patch("app.services.migration.stop_source_instance") as mock_stop,
-        patch("app.services.migration._delete_instance") as mock_delete,
         patch("app.services.migration.create_instance_on_host") as mock_create,
         patch("aiohttp.ClientSession.get") as mock_get,
     ):
@@ -660,7 +657,6 @@ async def test_migrate_create_target_fails(source_host, target_host, instance_co
             True,
         )
         mock_stop.return_value = {"status": "stopped"}
-        mock_delete.return_value = {"status": "deleted"}
         mock_create.side_effect = HTTPException(
             status_code=500, detail="Host internal error"
         )
@@ -674,10 +670,9 @@ async def test_migrate_create_target_fails(source_host, target_host, instance_co
         assert result.status == "failed"
         assert result.error is not None
         assert "Create target failed" in result.error
-        # Verify steps: stop_source should be ok, delete_source ok, create_target failed
+        # Verify steps: stop_source ok, create_target failed
         step_statuses = {s.step: s.status for s in result.steps}
         assert step_statuses.get("stop_source") == "ok"
-        assert step_statuses.get("delete_source") == "ok"
         assert step_statuses.get("create_target") == "failed"
 
 
