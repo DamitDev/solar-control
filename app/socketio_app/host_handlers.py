@@ -20,12 +20,10 @@ from .server import sio
 from app.database.hosts import host_db
 from app.database.jobs import job_db
 from app.models import Host, HostStatus
-from app.models.host import ActiveJobSummary
-from app.models.job import Job, JobStatus
+from app.models.job import JobStatus
 from app.models.socketio import (
     HostHealthPayload,
     HostPendingPayload,
-    HostStatusPayload,
     InstancesUpdatePayload,
     InstanceStatePayload,
     JobLifecyclePayload,
@@ -34,6 +32,7 @@ from app.models.socketio import (
     WSRegistration,
 )
 from app.redis_state import host_store
+from app.services.host_status import build_host_status_payload
 
 logger = logging.getLogger(__name__)
 
@@ -65,62 +64,9 @@ def _api_key_preview(api_key: str) -> str:
     return api_key[:8] + "..." if len(api_key) > 8 else api_key
 
 
-def _job_to_active_summary(job: Job) -> ActiveJobSummary:
-    """Convert a ``Job`` record to an ``ActiveJobSummary`` for host status views.
-
-    Extracts the job name and pipeline steps from the translated host
-    ``JobDefinition`` stored in ``job.payload``, and surfaces resource
-    hints where available.
-    """
-    payload = job.payload or {}
-    # The translated payload stores steps as a list of dicts with a "name" key.
-    steps: list[dict] = payload.get("steps", [])
-    pipeline: list[str] = [s["name"] for s in steps if isinstance(s, dict)]
-    name: str | None = payload.get("name")
-
-    # Extract lightweight resource hints from the payload.
-    resource_hints: dict[str, Any] = {}
-    training_config = payload.get("training_config") or {}
-    if training_config:
-        resource_hints["training_config"] = {
-            k: training_config[k]
-            for k in ("batch_size", "max_steps", "learning_rate")
-            if k in training_config
-        }
-    resources = payload.get("resources") or {}
-    if resources:
-        resource_hints["resources"] = resources
-
-    return ActiveJobSummary(
-        job_id=job.id,
-        submission_id=job.submission_id,
-        name=name,
-        status=job.status.value,
-        current_step_name=job.current_step_name,
-        current_step_index=job.current_step_index,
-        pipeline=pipeline,
-        resource_hints=resource_hints,
-        started_at=job.created_at.isoformat() if job.created_at else None,
-        completed_at=job.completed_at.isoformat() if job.completed_at else None,
-        error_message=job.error_message,
-    )
-
-
-async def _get_host_active_jobs(host_id: str) -> list[ActiveJobSummary]:
-    """Aggregate active and recently-terminal jobs for *host_id*.
-
-    Queries the jobs table and maps each ``Job`` to an ``ActiveJobSummary``.
-    """
-    jobs = await job_db.get_active_by_host(host_id)
-    return [_job_to_active_summary(j) for j in jobs]
-
-
 async def _emit_host_status(host: Host, *, connected: bool) -> None:
     """Emit a host_status event to WebUI using the typed payload model."""
-    active_jobs = await _get_host_active_jobs(host.id)
-    payload = HostStatusPayload.from_host(
-        host, connected=connected, active_jobs=active_jobs
-    )
+    payload = await build_host_status_payload(host, connected=connected)
     await sio.emit("host_status", payload.model_dump(), namespace="/webui")
 
 
@@ -684,6 +630,9 @@ async def _handle_job_lifecycle(
         timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
     )
 
+    # Tracks whether this event changed anything the active_jobs view exposes.
+    job_state_changed = False
+
     # Persist job-level status transitions (step_* events don't change it).
     new_status = _LIFECYCLE_STATUS.get(event_name)
     if new_status and job_id:
@@ -693,6 +642,7 @@ async def _handle_job_lifecycle(
             new_status,
             error_message=error_message if new_status == JobStatus.FAILED else None,
         )
+        job_state_changed = True
         if new_status in (
             JobStatus.COMPLETED,
             JobStatus.FAILED,
@@ -710,14 +660,17 @@ async def _handle_job_lifecycle(
                 step_name=str(step_name) if step_name is not None else None,
                 step_index=int(step_index) if step_index is not None else None,
             )
+            job_state_changed = True
 
     from .webui_handlers import broadcast_job_lifecycle as _b
 
     await _b(payload.model_dump())
 
-    # Broadcast updated host status so WebUI consumers see the new
-    # active_jobs summary immediately.
-    if host and job_id:
+    # Broadcast updated host status so WebUI consumers see the new active_jobs
+    # summary immediately. Skipped when nothing was persisted: step_completed
+    # and step_failed would rebroadcast an identical payload, and step_failed
+    # is always followed by job_failed, which does broadcast.
+    if host and job_state_changed:
         await _emit_host_status(host, connected=True)
 
 

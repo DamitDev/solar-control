@@ -5,11 +5,14 @@ Covers host selection, translation of the SuperNova intent into the Solar Host
 the S-025/S-026 event forwarding handlers.
 """
 
-from unittest.mock import AsyncMock, patch
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
-from app.database.jobs import JobDB
+from app.database.jobs import _ACTIVE_JOB_LIMIT, JobDB
 from app.jobs.host_selector import select_host
 from app.jobs.client import JobHostClient, JobHostClientError
 from app.jobs.router import _translate_payload, _resolve_train_input
@@ -509,6 +512,105 @@ async def test_job_db_update_status():
         mock_session.commit.assert_awaited_once()
 
 
+@pytest.mark.anyio
+async def test_job_db_update_step():
+    """Should persist the current pipeline step, including index 0."""
+    db = JobDB()
+
+    with patch.object(db, "_session") as mock_session_ctx:
+        mock_session = AsyncMock()
+        mock_session_ctx.return_value.__aenter__.return_value = mock_session
+        mock_execute_result = AsyncMock()
+        mock_execute_result.rowcount = 1
+        mock_session.execute.return_value = mock_execute_result
+
+        assert await db.update_job_step("job-1", step_name="train", step_index=0)
+
+    values = mock_session.execute.await_args.args[0].compile().params
+    assert values["current_step_name"] == "train"
+    assert values["current_step_index"] == 0
+
+
+async def _capture_active_by_host_stmt(db: JobDB, **kwargs):
+    """Run get_active_by_host against a mocked session, return the SELECT."""
+    with patch.object(db, "_session") as mock_session_ctx:
+        mock_session = AsyncMock()
+        mock_session_ctx.return_value.__aenter__.return_value = mock_session
+        mock_result = MagicMock()
+        mock_result.scalars.return_value = []
+        mock_session.execute.return_value = mock_result
+
+        await db.get_active_by_host("host-1", **kwargs)
+
+    return mock_session.execute.await_args.args[0]
+
+
+@pytest.mark.anyio
+async def test_job_db_active_by_host_is_bounded():
+    """The result feeds every host_status broadcast, so it must have a LIMIT."""
+    stmt = await _capture_active_by_host_stmt(JobDB())
+    compiled = stmt.compile(dialect=postgresql.dialect())
+
+    assert "LIMIT" in str(compiled)
+    assert _ACTIVE_JOB_LIMIT in compiled.params.values()
+
+
+@pytest.mark.anyio
+async def test_job_db_active_by_host_limit_is_overridable():
+    stmt = await _capture_active_by_host_stmt(JobDB(), limit=7)
+    compiled = stmt.compile(dialect=postgresql.dialect())
+
+    assert 7 in compiled.params.values()
+
+
+@pytest.mark.anyio
+async def test_job_db_active_by_host_orders_active_before_terminal():
+    """A long-running job must not be pushed past the limit by newer rows."""
+    stmt = await _capture_active_by_host_stmt(JobDB())
+    order_by = str(stmt.compile(dialect=postgresql.dialect())).split("ORDER BY", 1)[1]
+
+    assert order_by.index("jobs.status IN") < order_by.index("jobs.created_at DESC")
+
+
+@pytest.mark.anyio
+async def test_job_db_active_by_host_retention_cutoff():
+    """Terminal jobs are filtered against a completed_at cutoff."""
+    stmt = await _capture_active_by_host_stmt(JobDB(), terminal_retention_minutes=30)
+    params = stmt.compile(dialect=postgresql.dialect()).params
+
+    cutoff = next(v for v in params.values() if isinstance(v, datetime))
+    delta = datetime.now(timezone.utc) - cutoff
+    assert timedelta(minutes=29) < delta < timedelta(minutes=31)
+
+
+def test_job_db_row_mapping_includes_step_tracking():
+    """The new step columns round-trip through both row mappers."""
+    now = datetime.now(timezone.utc)
+    row = SimpleNamespace(
+        id="job-1",
+        host_id="host-1",
+        status="running",
+        payload={"name": "j"},
+        result=None,
+        error_message=None,
+        correlation_id="corr-1",
+        submission_id="sub-1",
+        current_step_name="train",
+        current_step_index=0,
+        created_at=now,
+        updated_at=now,
+        completed_at=None,
+    )
+
+    job = JobDB()._row_to_job(row)
+    assert job.current_step_name == "train"
+    assert job.current_step_index == 0
+
+    as_dict = JobDB()._job_to_dict(job)
+    assert as_dict["current_step_name"] == "train"
+    assert as_dict["current_step_index"] == 0
+
+
 def test_job_status_from_host():
     """Host status strings map to JobStatus; unknowns return None."""
     assert JobStatus.from_host("running") is JobStatus.RUNNING
@@ -766,6 +868,60 @@ async def test_host_lifecycle_step_event_does_not_change_status(online_training_
     emit_calls = [c for c in mock_emit.call_args_list if c[0][0] == "host_status"]
     assert len(emit_calls) == 1
     assert emit_calls[0][0][1]["host_id"] == "host-1"
+
+
+@pytest.mark.anyio
+async def test_host_lifecycle_step_completed_does_not_rebroadcast_host_status(
+    online_training_host,
+):
+    """step_completed persists nothing, so the host_status payload is unchanged."""
+    from app.socketio_app import host_handlers, webui_handlers
+
+    event = {
+        "job_id": "job-1",
+        "step_name": "train",
+        "step_index": 2,
+        "status": "completed",
+        "duration_s": 12.5,
+        "exit_code": 0,
+    }
+
+    with (
+        patch.object(
+            host_handlers.host_store,
+            "get_host_id_for_sid",
+            AsyncMock(return_value="host-1"),
+        ),
+        patch.object(
+            host_handlers.host_db,
+            "get_host",
+            AsyncMock(return_value=online_training_host),
+        ),
+        patch.object(
+            host_handlers.job_db,
+            "get_job",
+            AsyncMock(return_value=Job(id="job-1", host_id="host-1")),
+        ),
+        patch.object(host_handlers.job_db, "update_job_status", AsyncMock()),
+        patch.object(
+            host_handlers.job_db, "update_job_step", AsyncMock()
+        ) as mock_update_step,
+        patch.object(
+            host_handlers.job_db,
+            "get_active_by_host",
+            AsyncMock(return_value=[]),
+        ),
+        patch.object(
+            webui_handlers, "broadcast_job_lifecycle", AsyncMock()
+        ) as mock_broadcast,
+        patch.object(host_handlers.sio, "emit", AsyncMock()) as mock_emit,
+    ):
+        await host_handlers._handle_job_lifecycle("step_completed", "sid-1", event)
+
+    # The lifecycle event itself is still forwarded to WebUI.
+    mock_broadcast.assert_awaited_once()
+    mock_update_step.assert_not_called()
+    assert [c for c in mock_emit.call_args_list if c[0][0] == "host_status"] == []
 
 
 # ── WebUI Filter Tests ───────────────────────────────────────

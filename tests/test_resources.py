@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.database.jobs import job_db
 from app.models import (
     Host,
     HostStatus,
     HostResourceSnapshot,
     AggregatedResourceResponse,
 )
+from app.models.job import Job, JobStatus
 from app.routes.management.resources import _fetch_host_resource_snapshot
 
 
@@ -38,6 +40,20 @@ def mock_host_offline():
         gpu_type="A10-24GB",
         roles=["inference"],
     )
+
+
+@pytest.fixture(autouse=True)
+def no_active_jobs():
+    """Stub the jobs table for snapshot tests.
+
+    Without this the aggregation hits an uninitialized session factory and
+    silently degrades to an empty list, so these tests would only ever
+    exercise the failure path.
+    """
+    with patch.object(
+        job_db, "get_active_by_host", AsyncMock(return_value=[])
+    ) as mock_get:
+        yield mock_get
 
 
 @pytest.fixture
@@ -123,6 +139,46 @@ async def test_fetch_host_resource_snapshot_success(
         assert snap.reservation_vram_total_gb == 20.0
         assert snap.reservation_ram_total_gb == 64.0
         assert snap.reservation_disk_total_gb == 50.0
+        assert snap.active_jobs == []
+
+
+@pytest.mark.anyio
+async def test_fetch_host_resource_snapshot_includes_active_jobs(
+    mock_host_online, live_resource_payload, no_active_jobs
+):
+    """Job workloads are aggregated alongside inference instances (S-033)."""
+    no_active_jobs.return_value = [
+        Job(
+            id="job-1",
+            host_id="host-1",
+            status=JobStatus.RUNNING,
+            payload={
+                "name": "retrain",
+                "steps": [{"name": "train", "gpu": {"count": 2}}],
+            },
+            current_step_name="train",
+            current_step_index=0,
+        )
+    ]
+
+    with (
+        patch("app.routes.management.resources.host_store") as mock_store,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
+        mock_store.get_host_instances = AsyncMock(return_value=[])
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=live_resource_payload)
+        mock_get.return_value.__aenter__.return_value = mock_resp
+
+        snap = await _fetch_host_resource_snapshot(mock_host_online)
+
+    assert len(snap.active_jobs) == 1
+    job = snap.active_jobs[0]
+    assert job.job_id == "job-1"
+    assert job.name == "retrain"
+    assert job.current_step_name == "train"
+    assert job.resource_hints["peak_gpu_count"] == 2
 
 
 @pytest.mark.anyio

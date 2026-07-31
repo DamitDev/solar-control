@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.database.hosts import host_db
 from app.models import HostStatus, RegistryEntry
-from app.models.socketio import HostStatusPayload
 from app.redis_state import registry_store, health_store, routing_store, host_store
 
 logger = logging.getLogger(__name__)
@@ -249,12 +248,13 @@ class OpenAIGateway:
 
     async def _notify_host_online(self, host) -> None:
         """Emit host_status to WebUI when HTTP polling discovers a host is online."""
+        from app.services.host_status import build_host_status_payload
         from app.socketio_app.server import sio
 
         try:
             refreshed = await host_db.get_host(host.id)
             h = refreshed or host
-            payload = HostStatusPayload.from_host(h, connected=False)
+            payload = await build_host_status_payload(h, connected=False)
             await sio.emit("host_status", payload.model_dump(), namespace="/webui")
         except Exception as e:
             logger.debug("Failed to notify WebUI of host online: %s", e)

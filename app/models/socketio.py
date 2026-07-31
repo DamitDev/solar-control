@@ -112,8 +112,16 @@ class HostStatusPayload(BaseModel):
         host: Host,
         *,
         connected: bool,
-        active_jobs: list[ActiveJobSummary] | None = None,
+        active_jobs: list[ActiveJobSummary],
     ) -> "HostStatusPayload":
+        """Build a host_status payload.
+
+        ``active_jobs`` is required rather than defaulted: WebUI clients replace
+        their whole host entry on ``host_status``, so an accidentally-omitted
+        list would erase live job state. Prefer
+        ``app.services.host_status.build_host_status_payload``, which populates
+        it for you.
+        """
         return cls(
             host_id=host.id,
             name=host.name,
@@ -129,7 +137,7 @@ class HostStatusPayload(BaseModel):
             memory_available_gb=host.memory_available_gb,
             version=host.version,
             connected=connected,
-            active_jobs=active_jobs or [],
+            active_jobs=active_jobs,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 

@@ -14,7 +14,8 @@ from typing import Any
 from .server import sio
 from app.config import settings
 from app.database.hosts import host_db
-from app.models.socketio import HostStatusPayload, InstancesUpdatePayload
+from app.models.socketio import InstancesUpdatePayload
+from app.services.host_status import build_host_status_payload
 from app.socketio_app.host_handlers import (
     is_host_connected,
     get_pending_hosts,
@@ -54,7 +55,7 @@ async def webui_connect(
     hosts = await host_db.get_all_hosts()
     initial: list[dict[str, Any]] = []
     for h in hosts:
-        payload = HostStatusPayload.from_host(
+        payload = await build_host_status_payload(
             h, connected=await is_host_connected(h.id)
         )
         initial.append(payload.model_dump())

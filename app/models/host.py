@@ -83,11 +83,29 @@ class ActiveJobSummary(BaseModel):
     )
     current_step_name: str | None = Field(
         default=None,
-        description="Name of the currently executing pipeline step (e.g. 'train')",
+        description=(
+            "Name of the currently executing pipeline step (e.g. 'train'). "
+            "Only set while the job is pending or running"
+        ),
     )
     current_step_index: int | None = Field(
         default=None,
-        description="Zero-based index of the currently executing pipeline step",
+        description=(
+            "Zero-based index of the currently executing pipeline step. "
+            "Only set while the job is pending or running"
+        ),
+    )
+    last_step_name: str | None = Field(
+        default=None,
+        description=(
+            "Name of the last pipeline step the job entered. Remains set "
+            "after the job reaches a terminal state, so consumers can see "
+            "which step a failed job stopped on"
+        ),
+    )
+    last_step_index: int | None = Field(
+        default=None,
+        description="Zero-based index of the last pipeline step the job entered",
     )
     pipeline: list[str] = Field(
         default_factory=list,
@@ -95,7 +113,10 @@ class ActiveJobSummary(BaseModel):
     )
     resource_hints: dict[str, Any] = Field(
         default_factory=dict,
-        description="Resource hints extracted from the job payload (VRAM, RAM, etc.)",
+        description=(
+            "Resource requirements extracted from the translated job "
+            "definition (peak GPU count, minimum free disk, training config)"
+        ),
     )
     started_at: str | None = Field(
         default=None,

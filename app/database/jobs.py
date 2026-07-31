@@ -13,6 +13,11 @@ from .tables import JobRow
 # active-job aggregation view after they finish.
 _TERMINAL_RETENTION_MINUTES = 15
 
+# Cap on jobs returned per host. Jobs stuck in pending/running (e.g. the host
+# died mid-run) are never aged out, so without a cap the host_status payload
+# could grow without bound.
+_ACTIVE_JOB_LIMIT = 50
+
 
 class JobDB:
     """Database-backed job management."""
@@ -162,6 +167,7 @@ class JobDB:
         host_id: str,
         *,
         terminal_retention_minutes: int = _TERMINAL_RETENTION_MINUTES,
+        limit: int = _ACTIVE_JOB_LIMIT,
     ) -> list[Job]:
         """Get active and recently-terminal jobs for a given host.
 
@@ -169,7 +175,10 @@ class JobDB:
         - Non-terminal (pending, running), OR
         - Terminal (completed, failed, cancelled) within the retention window.
 
-        Ordered by creation time descending (most recent first).
+        Active jobs are ordered first, then by creation time descending, so a
+        long-running job is never pushed past ``limit`` by newer terminal or
+        stuck rows. The result feeds every host_status broadcast, so it must
+        stay bounded.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(
             minutes=terminal_retention_minutes
@@ -191,7 +200,11 @@ class JobDB:
                         & (JobRow.completed_at >= cutoff)
                     )
                 )
-                .order_by(JobRow.created_at.desc())
+                .order_by(
+                    JobRow.status.in_(terminal_statuses),
+                    JobRow.created_at.desc(),
+                )
+                .limit(limit)
             )
             return [self._row_to_job(row) for row in result.scalars()]
 
