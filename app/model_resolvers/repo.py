@@ -229,10 +229,23 @@ async def resolve_repo(source_uri: str, host_url: str, host_api_key: str) -> str
 
     Calls Data Repository for metadata, validates the result, then asks the
     target host to pull the Harbor artifact. Returns the resolved
-    ``local://`` URI pointing at the host-managed model directory.
+    ``local://`` URI pointing at the host-managed model directory (or the
+    subpath file within it when the URI carries one).
+
+    The subpath (``repo://name:version/model.gguf``) is a host-side file
+    selector: Data Repository is queried with ``repo://name:version`` only,
+    while the full URI — subpath included — is forwarded to the host pull
+    so the returned path resolves to the file.
     """
-    resolved = await resolve_from_data_repository(source_uri)
-    validate_resolved_model(resolved, source_uri)
+    from app.model_resolvers.parser import RepoURI, parse
+
+    parsed = parse(source_uri)
+    repo_lookup_uri = source_uri
+    if isinstance(parsed, RepoURI) and parsed.subpath:
+        repo_lookup_uri = f"repo://{parsed.name}:{parsed.version}"
+
+    resolved = await resolve_from_data_repository(repo_lookup_uri)
+    validate_resolved_model(resolved, repo_lookup_uri)
 
     payload = build_harbor_pull_payload(resolved, source_uri)
     path, _cached = await post_harbor_pull(

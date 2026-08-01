@@ -48,6 +48,29 @@ def test_parser_repo():
     assert isinstance(p, RepoURI)
     assert p.name == "iris-osl"
     assert p.version == "v3"
+    assert p.subpath == ""
+
+
+def test_parser_repo_with_subpath():
+    p = parse("repo://iris-osl:v3/model.gguf")
+    assert isinstance(p, RepoURI)
+    assert p.name == "iris-osl"
+    assert p.version == "v3"
+    assert p.subpath == "model.gguf"
+
+
+def test_parser_repo_with_nested_subpath():
+    p = parse("repo://iris-osl:v3/subdir/model.gguf")
+    assert isinstance(p, RepoURI)
+    assert p.name == "iris-osl"
+    assert p.version == "v3"
+    assert p.subpath == "subdir/model.gguf"
+
+
+def test_parser_repo_empty_subpath_errors():
+    with pytest.raises(HTTPException) as exc:
+        parse("repo://iris-osl:v3/")
+    assert exc.value.status_code == 400
 
 
 def test_parser_errors():
@@ -452,3 +475,37 @@ async def test_resolve_repo_latest_forwarded_verbatim(repo_settings):
         _, post_kwargs = mock_post.call_args
         assert post_kwargs["json"]["source_uri"] == "repo://iris-osl:latest"
         assert post_kwargs["json"]["version"] == "v7"
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_subpath_stripped_for_data_repo(repo_settings):
+    """``repo://name:version/file.gguf`` queries Data Repo without the subpath
+    but forwards the full URI (subpath included) to the host pull."""
+    uri = "repo://iris-osl:v3/model.gguf"
+
+    with (
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = _repo_resolve_payload()
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        pull_resp = AsyncMock()
+        pull_resp.status = 200
+        pull_resp.json.return_value = {
+            "path": "/opt/solar/models/repo--iris-osl--v3/model.gguf"
+        }
+        mock_post.return_value.__aenter__.return_value = pull_resp
+
+        resolved = await resolve(uri, "http://host:8000", "key")
+
+        # Data Repo sees the base URI only.
+        _, get_kwargs = mock_get.call_args
+        assert get_kwargs["params"] == {"uri": "repo://iris-osl:v3"}
+        # Host pull receives the full URI so it can select the file.
+        _, post_kwargs = mock_post.call_args
+        assert post_kwargs["json"]["source_uri"] == "repo://iris-osl:v3/model.gguf"
+        # Resolved local:// URI points at the file inside the directory.
+        assert resolved == "local:///opt/solar/models/repo--iris-osl--v3/model.gguf"
