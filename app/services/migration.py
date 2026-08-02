@@ -480,19 +480,32 @@ async def disown_source_instance(
         )
 
     # 2. Redis: clear markers so the reconciler stops observing it now.
-    instances = await host_store.get_host_instances(source_host.id)
-    for inst in instances:
-        iid = inst.get("instance_id") or inst.get("id")
-        if iid == instance_id:
-            cfg = inst.get("config", inst)
-            if isinstance(cfg, dict):
-                cfg.pop("managed_by", None)
-                cfg.pop("intent_id", None)
-                inst["config"] = cfg
-            inst.pop("managed_by", None)
-            inst.pop("intent_id", None)
-            break
-    await host_store.set_host_instances(source_host.id, instances)
+    # Must never escape as a raw 500: a failure here would leave the
+    # intent markers in Redis while the host-side markers are already
+    # cleared, and the reconciler would fight the stopped instance
+    # (RECREATE -> /stop spam) forever.
+    try:
+        instances = await host_store.get_host_instances(source_host.id)
+        for inst in instances:
+            iid = inst.get("instance_id") or inst.get("id")
+            if iid == instance_id:
+                cfg = inst.get("config", inst)
+                if isinstance(cfg, dict):
+                    cfg.pop("managed_by", None)
+                    cfg.pop("intent_id", None)
+                    inst["config"] = cfg
+                inst.pop("managed_by", None)
+                inst.pop("intent_id", None)
+                break
+        await host_store.set_host_instances(source_host.id, instances)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Failed to clear intent markers from Redis for source "
+                f"instance '{instance_id}': {e}"
+            ),
+        )
 
 
 async def stop_source_instance(source_host: Host, instance_id: str) -> dict[str, Any]:

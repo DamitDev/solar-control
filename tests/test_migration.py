@@ -367,6 +367,31 @@ async def test_stop_source_instance_success(source_host):
 
 
 @pytest.mark.anyio
+async def test_disown_source_redis_failure_raises_http_exception(
+    source_host, instance_config
+):
+    """Redis marker-clear failure must surface as HTTPException, not escape."""
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    with (
+        patch("aiohttp.ClientSession.put") as mock_put,
+        patch("app.services.migration.host_store") as mock_store,
+    ):
+        mock_put.return_value.__aenter__.return_value = mock_resp
+        mock_store.get_host_instances = AsyncMock(
+            side_effect=Exception("Redis connection lost")
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await disown_source_instance(
+                source_host, "inst-1", instance_config["config"]
+            )
+
+        assert exc_info.value.status_code == 502
+        assert "Redis" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
 async def test_stop_source_instance_unreachable(source_host):
     with patch(
         "aiohttp.ClientSession.post",
