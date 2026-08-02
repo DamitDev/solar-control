@@ -70,8 +70,9 @@ async def find_candidates(
 ) -> list[tuple[Host, HostResourceSnapshot]]:
     """Find candidate hosts matching placement constraints.
 
-    Returns candidates ranked by: most free VRAM → fewest instances → host id.
-    The first ``(host, snapshot)`` pair is the best choice.
+    Returns candidates ranked by: most free VRAM → most free disk →
+    fewest instances → host id. The first ``(host, snapshot)`` pair is
+    the best choice.
 
     Implements deployment-intent.md §8.4 placement policy.
     """
@@ -115,10 +116,12 @@ async def find_candidates(
 
         candidates.append((host, snap))
 
-    # Rank: most free VRAM → fewest running instances → host id (stable tiebreak)
+    # Rank: most free VRAM → most free disk → fewest running instances
+    # → host id (stable tiebreak) (§8.4)
     candidates.sort(
         key=lambda pair: (
             -(pair[1].vram_available_gb or 0),
+            -(pair[1].disk_available_gb or 0),
             pair[1].running_instance_count,
             pair[0].id,
         )

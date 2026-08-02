@@ -452,3 +452,85 @@ async def test_find_displaceable_preserve_alias_extra_replica():
 
         # Both are displaceable (more than one replica exists)
         assert len(result) == 2
+
+
+# ── §8.4 free-disk tiebreak ─────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_find_candidates_disk_tiebreak(host_a100, host_mps):
+    """Equal VRAM → more free disk ranks first (§8.4)."""
+    hosts = [host_a100, host_mps]
+    snapshots = {
+        host_a100.id: HostResourceSnapshot(
+            host_id=host_a100.id,
+            host_name=host_a100.name,
+            url=host_a100.url,
+            status=host_a100.status,
+            reachable=True,
+            vram_available_gb=80.0,
+            disk_available_gb=5.0,
+        ),
+        host_mps.id: HostResourceSnapshot(
+            host_id=host_mps.id,
+            host_name=host_mps.name,
+            url=host_mps.url,
+            status=host_mps.status,
+            reachable=True,
+            vram_available_gb=80.0,
+            disk_available_gb=50.0,
+        ),
+    }
+
+    with patch("app.services.placement.host_store") as mock_store:
+        mock_store.get_host_instances = AsyncMock(return_value=[])
+
+        candidates = await find_candidates(
+            hosts,
+            snapshots,
+            roles=["inference"],
+            vram_gb=6.0,
+        )
+
+        # Same VRAM → more free disk wins
+        assert candidates[0][0].id == "h-mps"
+        assert candidates[1][0].id == "h-a100"
+
+
+@pytest.mark.anyio
+async def test_find_candidates_vram_beats_disk(host_a100, host_mps):
+    """More free VRAM still outranks more free disk (§8.4 ordering)."""
+    hosts = [host_a100, host_mps]
+    snapshots = {
+        host_a100.id: HostResourceSnapshot(
+            host_id=host_a100.id,
+            host_name=host_a100.name,
+            url=host_a100.url,
+            status=host_a100.status,
+            reachable=True,
+            vram_available_gb=80.0,
+            disk_available_gb=1.0,
+        ),
+        host_mps.id: HostResourceSnapshot(
+            host_id=host_mps.id,
+            host_name=host_mps.name,
+            url=host_mps.url,
+            status=host_mps.status,
+            reachable=True,
+            vram_available_gb=40.0,
+            disk_available_gb=500.0,
+        ),
+    }
+
+    with patch("app.services.placement.host_store") as mock_store:
+        mock_store.get_host_instances = AsyncMock(return_value=[])
+
+        candidates = await find_candidates(
+            hosts,
+            snapshots,
+            roles=["inference"],
+            vram_gb=6.0,
+        )
+
+        assert candidates[0][0].id == "h-a100"
+        assert candidates[1][0].id == "h-mps"

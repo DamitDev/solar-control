@@ -749,12 +749,12 @@ class Reconciler:
                     )
                 )
 
-            # Check if instance failed unexpectedly. A stopped instance is
-            # a legitimate state (S-037 migration creates the target
-            # stopped, operators may stop instances) and must be left
-            # alone — RECREATE would only re-stop it every tick.
+            # Managed instances in failed/stopped/error are drift (§8.2):
+            # RECREATE restarts them; if the restart fails, the replica is
+            # deleted and re-created with backoff (so no /stop spam — the
+            # action restarts instead of stopping).
             status = inst.get("status") or inst.get("state", "")
-            if status in ("failed", "error") and not any(
+            if status in ("failed", "stopped", "error") and not any(
                 a.instance_id == inst_id and a.type == ActionType.REPLACE
                 for a in actions
             ):
@@ -827,7 +827,14 @@ class Reconciler:
         if surplus > 0:
             # Sort per §8.2: unhealthy/failed first (oldest→newest within
             # that group), then healthy instances most-recently-created
-            # first so long-lived replicas survive.
+            # first so long-lived replicas survive. Tiebreak by host load
+            # (fewest running instances stopped first).
+            snapshots = observed.get("snapshots", {})
+
+            def _host_load(inst: dict[str, Any]) -> int:
+                snap = snapshots.get(inst.get("_host_id"))
+                return getattr(snap, "running_instance_count", 0) or 0
+
             unhealthy_insts: list[dict[str, Any]] = []
             healthy_insts: list[dict[str, Any]] = []
             for inst in managed:
@@ -836,7 +843,12 @@ class Reconciler:
                     unhealthy_insts.append(inst)
                 else:
                     healthy_insts.append(inst)
-            unhealthy_insts.sort(key=lambda i: i.get("created_at") or "0")
+            unhealthy_insts.sort(
+                key=lambda i: ((i.get("created_at") or "0"), _host_load(i))
+            )
+            # Newest-first primary, least-loaded secondary. Two-pass stable
+            # sort: a single reverse=True would also flip the load tiebreak.
+            healthy_insts.sort(key=_host_load)
             healthy_insts.sort(key=lambda i: i.get("created_at") or "0", reverse=True)
             to_stop = (unhealthy_insts + healthy_insts)[:surplus]
             for inst in to_stop:
@@ -981,19 +993,40 @@ class Reconciler:
             return None
 
         if action.type == ActionType.RECREATE:
-            # Recreate = stop the failed instance so it can be re-created
-            # on a later tick. Only applies to failed/error instances —
-            # stopped instances are left alone (S-037 migration leaves the
-            # target stopped; RECREATE must not fight it).
+            # §8.2: "restart or recreate on the same or a new host (with
+            # backoff)". Try restart in place first; if the instance
+            # cannot be restarted, delete the broken replica so
+            # observed_count drops and the next tick's CREATE places a
+            # fresh replica (same or new host per placement). Raising
+            # records exponential backoff via _reconcile_one.
             if action.instance_id and action.host_id:
                 host = await host_db.get_host(action.host_id)
                 if host:
                     logger.info(
-                        "Stopping failed instance %s on %s for recreation",
+                        "Restarting instance %s on %s for recreation",
                         action.instance_id,
                         host.name,
                     )
-                    await stop_source_instance(host, action.instance_id)
+                    try:
+                        await self._start_instance(host, action.instance_id)
+                        return None
+                    except HTTPException:
+                        logger.warning(
+                            "Restart failed for instance %s on %s, recreating",
+                            action.instance_id,
+                            host.name,
+                            exc_info=True,
+                        )
+                        try:
+                            await self._delete_instance(host, action.instance_id)
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "Failed to delete instance %s on %s after failed restart",
+                                action.instance_id,
+                                host.name,
+                                exc_info=True,
+                            )
+                        raise  # record backoff so retries are paced
             return None
 
         if action.type == ActionType.MIGRATE:
@@ -1036,10 +1069,59 @@ class Reconciler:
             ]
 
             if not target_candidates:
+                # §8.5: "Only stop it if no migration target exists and
+                # policy allows (e.g. ephemeral)." staging is migrated,
+                # not stopped, when possible — leave it untouched.
+                from app.redis_state import host_store as _hs
+
+                inst_priority = "production"
+                try:
+                    insts = await _hs.get_host_instances(action.host_id)
+                    for inst in insts:
+                        iid = inst.get("instance_id") or inst.get("id")
+                        if iid == action.instance_id:
+                            inst_priority = (
+                                inst.get("priority")
+                                or inst.get("config", {}).get("priority")
+                                or "production"
+                            )
+                            break
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Could not read priority for instance %s",
+                        action.instance_id,
+                        exc_info=True,
+                    )
+                if inst_priority == "ephemeral":
+                    if source_host is None:
+                        logger.warning(
+                            "Host %s not found for stop fallback of instance %s",
+                            action.host_id,
+                            action.instance_id,
+                        )
+                        return None
+                    logger.info(
+                        "No migration target for %s (%s); ephemeral → stop",
+                        action.instance_id,
+                        action.alias,
+                    )
+                    await stop_source_instance(source_host, action.instance_id)
+                    try:
+                        await self._delete_instance(source_host, action.instance_id)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to delete instance %s on %s after stop",
+                            action.instance_id,
+                            source_host.name,
+                            exc_info=True,
+                        )
+                    return None
                 logger.warning(
-                    "No migration target found for instance %s (alias=%s)",
+                    "No migration target found for instance %s (alias=%s, "
+                    "priority=%s); leaving in place",
                     action.instance_id,
                     action.alias,
+                    inst_priority,
                 )
                 return None
 
@@ -1268,13 +1350,26 @@ class Reconciler:
                     last_transition=now_iso,
                 ).model_dump()
             )
-        if phase in (IntentPhase.RECONCILING, IntentPhase.DEGRADED):
+        if phase == IntentPhase.RECONCILING:
             conditions.append(
                 Condition(
                     type="Progressing",
                     status=True,
                     reason="Reconciling",
                     message="Reconciliation in progress",
+                    last_transition=now_iso,
+                ).model_dump()
+            )
+        if phase == IntentPhase.DEGRADED:
+            conditions.append(
+                Condition(
+                    type="Degraded",
+                    status=True,
+                    reason="ShortfallOrFailure",
+                    message=(
+                        f"{ready_count}/{desired} ready — "
+                        "desired replicas cannot all be made ready"
+                    ),
                     last_transition=now_iso,
                 ).model_dump()
             )

@@ -14,6 +14,7 @@ from app.models.intent import (
     ResourceRequirements,
 )
 from app.services.reconciliation import (
+    Action,
     ActionType,
     Reconciler,
     _detect_backend_drift,
@@ -253,6 +254,26 @@ class TestDiff:
         stops = [a for a in actions if a.type == ActionType.STOP]
         assert len(stops) == 1
 
+    def test_stop_surplus_least_loaded_first(self):
+        """Tiebreak among same-age healthy replicas: least-loaded host first."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1)
+        snapshots = {
+            "h1": _SnapshotStub("h1", running_instance_count=5),
+            "h2": _SnapshotStub("h2", running_instance_count=1),
+        }
+        observed = _make_observed(
+            managed=[
+                _make_managed_instance("inst-1", host_id="h1"),
+                _make_managed_instance("inst-2", host_id="h2"),
+            ],
+            snapshots=snapshots,
+        )
+        actions = reconciler._diff(intent, observed)
+        stops = [a for a in actions if a.type == ActionType.STOP]
+        assert len(stops) == 1
+        assert stops[0].instance_id == "inst-2"  # least-loaded stopped first
+
     def test_replace_on_model_source_drift(self):
         """When instance model_source differs, replace action is generated."""
         reconciler = Reconciler()
@@ -295,13 +316,13 @@ class TestDiff:
         recreates = [a for a in actions if a.type == ActionType.RECREATE]
         assert len(recreates) == 1
 
-    def test_no_recreate_on_stopped_instance(self):
-        """Stopped managed instances are left alone (S-037: migration
-        creates the target stopped; RECREATE must not fight it).
+    def test_recreate_on_stopped_instance(self):
+        """Stopped managed instances are drift → RECREATE (spec §8.2).
 
-        Regression: drift check treated 'stopped' like a failure and
-        emitted RECREATE every tick, which _act resolved to a /stop call
-        on an already-stopped instance — infinite /stop spam.
+        D-017-9 exempted 'stopped' to stop /stop spam, but the spam came
+        from _act RECREATE being stop-only. With restart-or-recreate
+        semantics, a managed stopped instance (e.g. a migration target)
+        must be restarted automatically.
         """
         reconciler = Reconciler()
         intent = _make_intent(replicas=1)
@@ -312,7 +333,7 @@ class TestDiff:
         )
         actions = reconciler._diff(intent, observed)
         recreates = [a for a in actions if a.type == ActionType.RECREATE]
-        assert len(recreates) == 0
+        assert len(recreates) == 1
 
     def test_stop_all_on_delete(self):
         """Deleting intents get stop actions for all managed instances."""
@@ -609,3 +630,191 @@ class TestReconcileOne:
 
         assert reconciler._backoff_active(intent.id) is True
         assert reconciler._backoff[intent.id]["failures"] == 1
+
+
+# ── _act tests ──────────────────────────────────────────────────
+
+
+class TestActRecreate:
+    """_act RECREATE: restart-or-recreate with backoff (§8.2)."""
+
+    @pytest.mark.anyio
+    async def test_recreate_restarts_failed_instance(self):
+        """RECREATE restarts the instance in place (spec §8.2)."""
+        reconciler = Reconciler()
+        host = _HostStub(id="h1")
+        action = Action(
+            type=ActionType.RECREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            instance_id="inst-1",
+            reason="Instance stopped, recreating",
+        )
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch.object(reconciler, "_start_instance", new=AsyncMock()) as mock_start,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            result = await reconciler._act(_make_intent(), action)
+            mock_start.assert_awaited_once_with(host, "inst-1")
+            assert result is None  # restart path returns None (next tick is no-op)
+
+    @pytest.mark.anyio
+    async def test_recreate_deletes_and_raises_when_restart_fails(self):
+        """Restart failure → delete broken replica + raise (backoff recorded)."""
+        from fastapi import HTTPException
+
+        reconciler = Reconciler()
+        host = _HostStub(id="h1")
+        action = Action(
+            type=ActionType.RECREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            instance_id="inst-1",
+            reason="Instance failed, recreating",
+        )
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch.object(
+                reconciler,
+                "_start_instance",
+                new=AsyncMock(
+                    side_effect=HTTPException(status_code=502, detail="boom")
+                ),
+            ),
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            with pytest.raises(HTTPException):
+                await reconciler._act(_make_intent(), action)
+            mock_delete.assert_awaited_once_with(host, "inst-1")
+
+    @pytest.mark.anyio
+    async def test_recreate_restart_failure_records_backoff(self):
+        """Failed recreate (via _reconcile_one) engages exponential backoff."""
+        from fastapi import HTTPException
+
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1)
+        managed = [_make_managed_instance("inst-1", status="failed")]
+        observed = _make_observed(managed=managed)
+
+        async def boom(intent_, action):
+            raise HTTPException(status_code=502, detail="start failed")
+
+        with (
+            patch.object(reconciler, "_observe", new=AsyncMock(return_value=observed)),
+            patch.object(reconciler, "_act", new=AsyncMock(side_effect=boom)),
+            patch.object(reconciler, "_update_status", new=AsyncMock()),
+        ):
+            await reconciler._reconcile_one(intent)
+        assert reconciler._backoff_active(intent.id) is True
+
+
+class TestActMigrate:
+    """_act MIGRATE: stop fallback when no target exists (§8.5)."""
+
+    @pytest.mark.anyio
+    async def test_migrate_no_target_ephemeral_falls_back_to_stop(self):
+        """No migration target + ephemeral instance → stop+delete fallback."""
+        reconciler = Reconciler()
+        host = _HostStub(id="h1")
+        action = Action(
+            type=ActionType.MIGRATE,
+            intent_id="intent-001",
+            alias="other-alias",
+            host_id="h1",
+            instance_id="inst-1",
+            reason="Displacing other-alias (ephemeral) to free capacity",
+        )
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch("app.redis_state.host_store") as mock_store,
+            patch(
+                "app.services.migration.stop_source_instance", new=AsyncMock()
+            ) as mock_stop,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            mock_db.get_all_hosts = AsyncMock(return_value=[])
+            with patch(
+                "app.services.placement.find_candidates",
+                new=AsyncMock(return_value=[]),
+            ):
+                mock_store.get_host_instances = AsyncMock(
+                    return_value=[{"instance_id": "inst-1", "priority": "ephemeral"}]
+                )
+                await reconciler._act(_make_intent(), action)
+            mock_stop.assert_awaited_once_with(host, "inst-1")
+            mock_delete.assert_awaited_once_with(host, "inst-1")
+
+    @pytest.mark.anyio
+    async def test_migrate_no_target_staging_not_stopped(self):
+        """No migration target + staging instance → no stop fallback."""
+        reconciler = Reconciler()
+        host = _HostStub(id="h1")
+        action = Action(
+            type=ActionType.MIGRATE,
+            intent_id="intent-001",
+            alias="other-alias",
+            host_id="h1",
+            instance_id="inst-1",
+            reason="Displacing other-alias (staging) to free capacity",
+        )
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch("app.redis_state.host_store") as mock_store,
+            patch(
+                "app.services.migration.stop_source_instance", new=AsyncMock()
+            ) as mock_stop,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            mock_db.get_all_hosts = AsyncMock(return_value=[])
+            with patch(
+                "app.services.placement.find_candidates",
+                new=AsyncMock(return_value=[]),
+            ):
+                mock_store.get_host_instances = AsyncMock(
+                    return_value=[{"instance_id": "inst-1", "priority": "staging"}]
+                )
+                result = await reconciler._act(_make_intent(), action)
+            assert result is None
+            mock_stop.assert_not_called()
+            mock_delete.assert_not_called()
+
+
+class TestUpdateStatusConditions:
+    """Status conditions emitted by _update_status (§10.3)."""
+
+    @pytest.mark.anyio
+    async def test_update_status_emits_degraded_condition(self):
+        """DEGRADED phase → Degraded condition, not Progressing."""
+        reconciler = Reconciler()
+        intent = _make_intent(
+            status=IntentStatus(
+                phase=IntentPhase.DEGRADED,
+                reconcile=ReconcileState.IN_PROGRESS,
+                desired_replicas=2,
+            )
+        )
+        observed = _make_observed(
+            managed=[_make_managed_instance("inst-1", status="running")],
+            gateway_aliases={"test-model"},
+        )
+        with patch("app.database.intents.intent_db") as mock_db:
+            mock_db.update_status = AsyncMock()
+            await reconciler._update_status(intent, observed)
+        _, kwargs = mock_db.update_status.call_args
+        status_json = kwargs["status_json"]
+        types = {c["type"] for c in status_json["conditions"]}
+        assert "Degraded" in types
+        assert "Progressing" not in types

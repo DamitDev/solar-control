@@ -1,5 +1,6 @@
 """Tests for instance migration (S-037)."""
 
+import copy
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -585,6 +586,81 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         _, put_kwargs = mock_put.call_args
         assert put_kwargs["json"]["managed_by"] is None
         assert put_kwargs["json"]["intent_id"] is None
+
+
+@pytest.mark.anyio
+async def test_migrate_target_keeps_managed_markers(
+    source_host, target_host, instance_config
+):
+    """Target is created managed (G3): managed_by/intent_id preserved in
+    the create wrapper so the reconciler adopts and restarts it (§8.2)."""
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+        patch("app.services.migration.ensure_model_on_target") as mock_ensure,
+        patch("app.services.migration.stop_source_instance") as mock_stop,
+        patch("app.services.migration.create_instance_on_host") as mock_create,
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.put") as mock_put,
+    ):
+        mock_db.get_host = AsyncMock(
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
+        )
+        # Source instance carries the ownership markers (managed by intent)
+        captured = {
+            **instance_config,
+            "managed_by": "intent",
+            "intent_id": "intent-1",
+        }
+        # Fresh copy per fetch: disown_source_instance pops markers from
+        # its Redis fetch; production Redis returns new objects per call,
+        # so the captured dict must not be aliased by the mock.
+        mock_store.get_host_instances = AsyncMock(
+            side_effect=lambda hid: (
+                [copy.deepcopy(captured)] if hid == "host-src" else []
+            )
+        )
+        mock_store.set_host_instances = AsyncMock()
+        mock_train_check.return_value = None
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
+        mock_get.return_value.__aenter__.return_value = mock_resp
+
+        put_resp = AsyncMock()
+        put_resp.status = 200
+        mock_put.return_value.__aenter__.return_value = put_resp
+
+        mock_ensure.return_value = ("/models/repo--test--v1", True)
+        mock_stop.return_value = {"status": "stopped"}
+        mock_create.return_value = {
+            "instance": {"id": "new-inst", "status": "stopped"},
+            "message": "created",
+        }
+
+        result = await execute_migration(
+            instance_id="inst-1",
+            source_host_id="host-src",
+            target_host_id="host-tgt",
+        )
+
+        assert result.status == "completed"
+        # No disown_target step — target stays managed
+        step_names = [s.step for s in result.steps]
+        assert "disown_target" not in step_names
+        # Create wrapper carries the ownership markers at top level (G3)
+        create_wrapper = mock_create.call_args[0][1]
+        assert create_wrapper["managed_by"] == "intent"
+        assert create_wrapper["intent_id"] == "intent-1"
+        assert create_wrapper["priority"] == "staging"
+        # Source disown PUT still happened (source stays stopped + unmanaged)
+        assert len(result.steps) == 9
 
 
 @pytest.mark.anyio
