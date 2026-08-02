@@ -447,6 +447,55 @@ async def test_disown_source_instance_success(source_host, instance_config):
 
 
 @pytest.mark.anyio
+async def test_disown_source_flat_ws_format_no_circular_reference(
+    source_host, instance_config
+):
+    """Flat WS-format Redis entries (no nested 'config' key) must not crash.
+
+    Regression: ``inst.get("config", inst)`` fell back to the instance dict
+    itself, then ``inst["config"] = cfg`` created a self-reference that blew
+    up ``json.dumps`` in ``set_host_instances`` with "Circular reference
+    detected", leaving intent markers in Redis and causing the reconciler
+    to fight the stopped source instance (RECREATE -> /stop spam).
+    """
+    with (
+        patch("aiohttp.ClientSession.put") as mock_put,
+        patch("app.services.migration.host_store") as mock_store,
+    ):
+        put_resp = AsyncMock()
+        put_resp.status = 200
+        mock_put.return_value.__aenter__.return_value = put_resp
+
+        # Flat WS format: markers at top level, NO nested "config" key
+        instances = [
+            {
+                "instance_id": "inst-1",
+                "alias": "test-model:v1",
+                "model_source": "repo://test-model:v1",
+                "status": "stopped",
+                "port": 3500,
+                "managed_by": "intent",
+                "intent_id": "intent-1",
+            }
+        ]
+        mock_store.get_host_instances = AsyncMock(return_value=instances)
+        mock_store.set_host_instances = AsyncMock()
+
+        await disown_source_instance(source_host, "inst-1", instance_config["config"])
+
+        # No self-reference: stored entry must remain JSON-serializable
+        import json
+
+        stored = mock_store.set_host_instances.call_args[0][1]
+        json.dumps(stored)  # must not raise Circular reference detected
+
+        # Top-level markers cleared (flat format has no nested config)
+        assert stored[0].get("managed_by") is None
+        assert stored[0].get("intent_id") is None
+        assert "config" not in stored[0] or isinstance(stored[0]["config"], dict)
+
+
+@pytest.mark.anyio
 async def test_disown_source_instance_unreachable(source_host, instance_config):
     with patch(
         "aiohttp.ClientSession.put",

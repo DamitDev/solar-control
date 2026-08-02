@@ -489,11 +489,13 @@ async def disown_source_instance(
         for inst in instances:
             iid = inst.get("instance_id") or inst.get("id")
             if iid == instance_id:
-                cfg = inst.get("config", inst)
+                # Redis host_store entries are the flat WS format: markers
+                # live at top level, and there is no nested "config" key.
+                # Never fall back to `inst` itself (would self-reference).
+                cfg = inst.get("config")
                 if isinstance(cfg, dict):
                     cfg.pop("managed_by", None)
                     cfg.pop("intent_id", None)
-                    inst["config"] = cfg
                 inst.pop("managed_by", None)
                 inst.pop("intent_id", None)
                 break
