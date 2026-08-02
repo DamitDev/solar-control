@@ -11,6 +11,7 @@ from app.services.migration import (
     capture_instance_config,
     check_one_replica_per_host,
     create_instance_on_host,
+    disown_source_instance,
     ensure_model_on_target,
     execute_migration,
     stop_source_instance,
@@ -376,6 +377,63 @@ async def test_stop_source_instance_unreachable(source_host):
         assert exc.value.status_code == 502
 
 
+# ── disown_source_instance ───────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_disown_source_instance_success(source_host, instance_config):
+    """Disown clears markers on the host and in the Redis cache."""
+    with (
+        patch("aiohttp.ClientSession.put") as mock_put,
+        patch("app.services.migration.host_store") as mock_store,
+    ):
+        put_resp = AsyncMock()
+        put_resp.status = 200
+        mock_put.return_value.__aenter__.return_value = put_resp
+
+        instances = [
+            {
+                "instance_id": "inst-1",
+                "config": {
+                    "alias": "test-model:v1",
+                    "model_source": "repo://test-model:v1",
+                },
+                "managed_by": "intent",
+                "intent_id": "intent-1",
+            }
+        ]
+        mock_store.get_host_instances = AsyncMock(return_value=instances)
+        mock_store.set_host_instances = AsyncMock()
+
+        await disown_source_instance(source_host, "inst-1", instance_config["config"])
+
+        # Host PUT clears markers
+        _, put_kwargs = mock_put.call_args
+        assert put_kwargs["json"]["managed_by"] is None
+        assert put_kwargs["json"]["intent_id"] is None
+
+        # Redis cache updated
+        mock_store.set_host_instances.assert_awaited_once()
+        stored = mock_store.set_host_instances.call_args[0][1]
+        assert stored[0].get("managed_by") is None
+        assert stored[0].get("intent_id") is None
+        assert stored[0]["config"].get("managed_by") is None
+        assert stored[0]["config"].get("intent_id") is None
+
+
+@pytest.mark.anyio
+async def test_disown_source_instance_unreachable(source_host, instance_config):
+    with patch(
+        "aiohttp.ClientSession.put",
+        side_effect=Exception("Connection refused"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await disown_source_instance(
+                source_host, "inst-1", instance_config["config"]
+            )
+        assert exc.value.status_code == 502
+
+
 # ── execute_migration (integration) ───────────────────────────────
 
 
@@ -390,6 +448,7 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         patch("app.services.migration.stop_source_instance") as mock_stop,
         patch("app.services.migration.create_instance_on_host") as mock_create,
         patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.put") as mock_put,
     ):
         # DB: both hosts exist
         mock_db.get_host = AsyncMock(
@@ -404,6 +463,7 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         mock_store.get_host_instances = AsyncMock(
             side_effect=lambda hid: [instance_config] if hid == "host-src" else []
         )
+        mock_store.set_host_instances = AsyncMock()
         mock_train_check.return_value = None
 
         # Disk check passes
@@ -411,6 +471,11 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         mock_resp.status = 200
         mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
+
+        # Disown PUT succeeds
+        put_resp = AsyncMock()
+        put_resp.status = 200
+        mock_put.return_value.__aenter__.return_value = put_resp
 
         mock_ensure.return_value = (
             "/models/repo--test--v1",
@@ -435,10 +500,17 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         assert result.target_host_id == "host-tgt"
         assert result.target_instance_id == "new-inst"
 
-        # All 8 steps should be ok
-        assert len(result.steps) == 8
+        # All 9 steps should be ok
+        assert len(result.steps) == 9
         for step in result.steps:
             assert step.status == "ok", f"Step '{step.step}' failed"
+        step_names = [s.step for s in result.steps]
+        assert "disown_source" in step_names
+
+        # Disown PUT clears markers on the source host
+        _, put_kwargs = mock_put.call_args
+        assert put_kwargs["json"]["managed_by"] is None
+        assert put_kwargs["json"]["intent_id"] is None
 
 
 @pytest.mark.anyio
@@ -634,6 +706,7 @@ async def test_migrate_create_target_fails(source_host, target_host, instance_co
         patch("app.services.migration.stop_source_instance") as mock_stop,
         patch("app.services.migration.create_instance_on_host") as mock_create,
         patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.put") as mock_put,
     ):
         mock_db.get_host = AsyncMock(
             side_effect=lambda hid: (
@@ -645,12 +718,18 @@ async def test_migrate_create_target_fails(source_host, target_host, instance_co
         mock_store.get_host_instances = AsyncMock(
             side_effect=lambda hid: [instance_config] if hid == "host-src" else []
         )
+        mock_store.set_host_instances = AsyncMock()
         mock_train_check.return_value = None
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
         mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
         mock_get.return_value.__aenter__.return_value = mock_resp
+
+        # Disown PUT succeeds
+        put_resp = AsyncMock()
+        put_resp.status = 200
+        mock_put.return_value.__aenter__.return_value = put_resp
 
         mock_ensure.return_value = (
             "/models/repo--test--v1",

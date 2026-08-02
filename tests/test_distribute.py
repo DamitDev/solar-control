@@ -9,7 +9,7 @@ from app.routes.management.models import (
     DistributeRequest,
     _StructuredPullError,
 )
-from app.model_resolvers.parser import parse
+from app.model_resolvers.parser import RepoURI, parse
 
 
 @pytest.fixture
@@ -156,6 +156,49 @@ async def test_pull_on_host_repo_uri(mock_host, repo_settings):
 
         result = await _pull_on_host(parsed, uri, mock_host)
         assert result == ("/models/repo--model--v1", False)
+
+
+@pytest.mark.anyio
+async def test_pull_on_host_repo_uri_subpath_stripped_for_data_repo(
+    mock_host, repo_settings
+):
+    """``repo://name:version/file.gguf`` queries Data Repo with the base URI
+    but forwards the full URI (subpath included) to the host pull (D-017)."""
+    uri = "repo://model:v1/model.gguf"
+    parsed = parse(uri)
+    assert isinstance(parsed, RepoURI)
+    assert parsed.subpath == "model.gguf"
+    with (
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = {
+            "category": "model",
+            "name": "model",
+            "version": "v1",
+            "harbor_ref": "imgrepo.damit.hu/supernova/model:v1",
+            "size_bytes": 123,
+            "checksum": "sha256:abc",
+            "metadata": {},
+            "created_at": "2026-04-29T10:00:00Z",
+        }
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        pull_resp = AsyncMock()
+        pull_resp.status = 200
+        pull_resp.json.return_value = {"path": "/models/repo--model--v1/model.gguf"}
+        mock_post.return_value.__aenter__.return_value = pull_resp
+
+        result = await _pull_on_host(parsed, uri, mock_host)
+        assert result == ("/models/repo--model--v1/model.gguf", False)
+
+        # Data Repo sees the base URI only; the host gets the full URI.
+        _, get_kwargs = mock_get.call_args
+        assert get_kwargs["params"] == {"uri": "repo://model:v1"}
+        _, post_kwargs = mock_post.call_args
+        assert post_kwargs["json"]["source_uri"] == "repo://model:v1/model.gguf"
 
 
 @pytest.mark.anyio

@@ -242,8 +242,15 @@ async def _pull_on_host(
         )
     if isinstance(parsed, RepoURI):
         try:
-            resolved = await resolve_from_data_repository(source_uri)
-            validate_resolved_model(resolved, source_uri)
+            # The subpath (repo://name:version/subpath) is a host-side file
+            # selector: Data Repository is queried with the base URI only,
+            # while the full URI is forwarded to the host pull so the
+            # returned path resolves to the file (D-017).
+            repo_lookup_uri = source_uri
+            if parsed.subpath:
+                repo_lookup_uri = f"repo://{parsed.name}:{parsed.version}"
+            resolved = await resolve_from_data_repository(repo_lookup_uri)
+            validate_resolved_model(resolved, repo_lookup_uri)
         except HTTPException as exc:
             if exc.status_code >= 500:
                 raise
