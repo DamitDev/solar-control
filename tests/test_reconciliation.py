@@ -295,6 +295,25 @@ class TestDiff:
         recreates = [a for a in actions if a.type == ActionType.RECREATE]
         assert len(recreates) == 1
 
+    def test_no_recreate_on_stopped_instance(self):
+        """Stopped managed instances are left alone (S-037: migration
+        creates the target stopped; RECREATE must not fight it).
+
+        Regression: drift check treated 'stopped' like a failure and
+        emitted RECREATE every tick, which _act resolved to a /stop call
+        on an already-stopped instance — infinite /stop spam.
+        """
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1)
+        observed = _make_observed(
+            managed=[
+                _make_managed_instance("inst-1", status="stopped"),
+            ]
+        )
+        actions = reconciler._diff(intent, observed)
+        recreates = [a for a in actions if a.type == ActionType.RECREATE]
+        assert len(recreates) == 0
+
     def test_stop_all_on_delete(self):
         """Deleting intents get stop actions for all managed instances."""
         reconciler = Reconciler()

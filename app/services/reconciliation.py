@@ -749,9 +749,12 @@ class Reconciler:
                     )
                 )
 
-            # Check if instance failed/stopped unexpectedly
+            # Check if instance failed unexpectedly. A stopped instance is
+            # a legitimate state (S-037 migration creates the target
+            # stopped, operators may stop instances) and must be left
+            # alone — RECREATE would only re-stop it every tick.
             status = inst.get("status") or inst.get("state", "")
-            if status in ("failed", "stopped", "error") and not any(
+            if status in ("failed", "error") and not any(
                 a.instance_id == inst_id and a.type == ActionType.REPLACE
                 for a in actions
             ):
@@ -978,7 +981,10 @@ class Reconciler:
             return None
 
         if action.type == ActionType.RECREATE:
-            # Recreate = stop failed instance, next tick creates replacement
+            # Recreate = stop the failed instance so it can be re-created
+            # on a later tick. Only applies to failed/error instances —
+            # stopped instances are left alone (S-037 migration leaves the
+            # target stopped; RECREATE must not fight it).
             if action.instance_id and action.host_id:
                 host = await host_db.get_host(action.host_id)
                 if host:
