@@ -24,7 +24,9 @@ jobs:
       - name: Install Ruff
         run: |
           python -m pip install --upgrade pip
-          pip install ruff
+          # Pinned: ruff 0.16 changed the default rule set and flags the
+          # codebase's existing style (170 errors). See PR #60.
+          pip install ruff==0.15.14
 
       - name: Lint with Ruff
         run: ruff check app

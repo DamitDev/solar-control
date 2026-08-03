@@ -1,5 +1,5 @@
 # CI-only tools (lint/format/test). App runtime deps: requirements.txt
 -r requirements.txt
 pytest>=8.0
-ruff>=0.8.0
+ruff==0.15.14
 black>=24.0
