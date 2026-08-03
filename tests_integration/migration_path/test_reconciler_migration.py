@@ -89,14 +89,14 @@ async def test_migrated_target_auto_started(http_control, stack, clean_state):
     # lands in the gateway registry.
     await wait_for(
         lambda: _instance_running(http_control, dst_id, target_instance_id),
-        timeout=120.0,
+        timeout=15.0,
         interval=0.5,
         description="migration target auto-started by reconciler",
     )
     await wait_for(
         lambda: _registry_visible(http_control, alias),
         timeout=60.0,
-        interval=1.0,
+        interval=0.5,
         description="alias registered after migration",
     )
 
@@ -111,8 +111,7 @@ async def test_migrated_target_auto_started(http_control, stack, clean_state):
     # /stop spam, no extra starts of the source).
     stops_after = count_host_requests(stack, src_letter, "POST", "/instances/")
     assert stops_after - stops_before == 1, (
-        f"unexpected extra stop calls on source host "
-        f"({stops_after - stops_before})"
+        f"unexpected extra stop calls on source host " f"({stops_after - stops_before})"
     )
 
     # (3) The target carries the markers top-level.
@@ -170,14 +169,14 @@ async def test_recreate_failure_records_backoff_and_recovers(
     # The reconciler's RECREATE start fails -> last_error / backoff recorded.
     await wait_for(
         lambda: _last_error_or_failed(http_control, intent["id"]),
-        timeout=120.0,
+        timeout=15.0,
         interval=0.5,
         description="reconcile failure recorded (backoff)",
     )
 
     # Restore the key; the next RECREATE restarts the instance in place.
     update_host_api_key(stack.db_env["control_db"], host_id, real_key)
-    final = await wait_intent_ready(http_control, intent["id"], timeout=120.0)
+    final = await wait_intent_ready(http_control, intent["id"], timeout=15.0)
     replicas = final["status"]["replica_set"]
     assert len(replicas) == 1
     assert replicas[0]["instance_id"] == instance_id, "restart-in-place expected"

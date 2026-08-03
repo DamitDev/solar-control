@@ -31,11 +31,11 @@ async def test_register_model_version(http_data_repo, stack, clean_state):
     from fixtures.constants import harbor_port
 
     name = await _unique_name()
-    harbor_ref = (
-        f"127.0.0.1:{harbor_port(stack.harbor_ref)}/supernova/{name}:v1"
-    )
+    harbor_ref = f"127.0.0.1:{harbor_port(stack.harbor_ref)}/supernova/{name}:v1"
     # Push the artifact into (stub) Harbor, then register metadata.
-    stack.stub_harbor.register_model(harbor_ref, read_test_model_files(FIXTURE_MODEL_DIR))
+    stack.stub_harbor.register_model(
+        harbor_ref, read_test_model_files(FIXTURE_MODEL_DIR)
+    )
     stack.stub_harbor.reset()
 
     body = await register_model_in_data_repo(
@@ -53,29 +53,32 @@ async def test_register_model_version(http_data_repo, stack, clean_state):
     assert versions[0]["harbor_ref"] == harbor_ref
 
     # data-repo verified the artifact against (stub) Harbor on registration
-    manifest_calls = stack.stub_harbor.count_requests("HEAD", f"/v2/supernova/{name}/manifests/v1")
+    manifest_calls = stack.stub_harbor.count_requests(
+        "HEAD", f"/v2/supernova/{name}/manifests/v1"
+    )
     assert manifest_calls >= 1, (
         "data-repo never called Harbor verify_artifact during registration; "
         f"requests seen: {stack.stub_harbor.received_paths()}"
     )
 
 
-async def test_register_version_404_unknown_harbor_ref(http_data_repo, stack, clean_state):
+async def test_register_version_404_unknown_harbor_ref(
+    http_data_repo, stack, clean_state
+):
     """Registration with a ref not present in Harbor -> 4xx, nothing persisted."""
     from fixtures.constants import harbor_port
 
     name = await _unique_name()
-    missing_ref = (
-        f"127.0.0.1:{harbor_port(stack.harbor_ref)}/supernova/{name}:v9"
-    )
+    missing_ref = f"127.0.0.1:{harbor_port(stack.harbor_ref)}/supernova/{name}:v9"
 
     resp = await http_data_repo.post(
         f"/api/models/{name}/versions",
         json={"harbor_ref": missing_ref, "version": "v1"},
     )
-    assert resp.status_code in (404, 422), (
-        f"expected 4xx for unknown Harbor ref, got {resp.status_code}: {resp.text}"
-    )
+    assert resp.status_code in (
+        404,
+        422,
+    ), f"expected 4xx for unknown Harbor ref, got {resp.status_code}: {resp.text}"
 
     # Nothing persisted
     resp = await http_data_repo.get(f"/api/models/{name}")

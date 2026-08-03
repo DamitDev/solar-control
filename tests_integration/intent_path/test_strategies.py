@@ -14,12 +14,13 @@ import pytest
 from fixtures.constants import MODEL_NAME
 from fixtures.helpers import wait_for
 from fixtures.intents import (
+    classify_until_ok,
     create_intent,
     get_intent,
     replica_states,
     wait_intent_ready,
 )
-from fixtures.seed import count_host_requests, read_test_model_files, update_intent_in_db
+from fixtures.seed import read_test_model_files, update_intent_in_db
 
 pytestmark = pytest.mark.intent_path
 
@@ -31,9 +32,14 @@ def _alias(prefix: str = "strat") -> str:
 async def _register_v2(stack, http_data_repo) -> str:
     """Register test-model:v2 (different artifact) in stub Harbor + data-repo.
 
-    Idempotent: v2 is shared across tests in the module.
+    Idempotent: v2 is shared across tests in the module. The v2 artifact
+    is a *valid* safetensors file (tensors bit-identical to v1, only the
+    header metadata differs -> different sha256 -> different artifact
+    identity), so v2 replicas actually serve inference instead of
+    crashing at startup.
     """
     from fixtures.constants import FIXTURE_MODEL_DIR, harbor_port
+    from fixtures.helpers import rewrite_safetensors_with_metadata
 
     v2_ref = f"127.0.0.1:{harbor_port(stack.harbor_ref)}/supernova/{MODEL_NAME}:v2"
     resp = await http_data_repo.get(f"/api/models/{MODEL_NAME}/versions")
@@ -42,9 +48,15 @@ async def _register_v2(stack, http_data_repo) -> str:
     ):
         return f"repo://{MODEL_NAME}:v2"
     files = read_test_model_files(FIXTURE_MODEL_DIR)
-    # Different content so the artifact identity differs from v1.
+    # Different but VALID content: re-save the same tensors with a
+    # "version: v2" header entry. Appending bytes to a safetensors file
+    # (the old construction) makes it longer than the header's
+    # data_offsets coverage -> every v2 instance crashed on start with
+    # SafetensorError ("incomplete metadata, file not fully covered").
     files = dict(files)
-    files["model.safetensors"] = files["model.safetensors"] + b"v2"
+    files["model.safetensors"] = rewrite_safetensors_with_metadata(
+        files["model.safetensors"], {"version": "v2"}
+    )
     stack.stub_harbor.register_model(v2_ref, files)
     resp = await http_data_repo.post(
         f"/api/models/{MODEL_NAME}/versions",
@@ -66,8 +78,9 @@ async def _wait_model_source(http_control, intent_id: str, source: str) -> dict:
             return False
         return all(r.get("model_source") == source for r in replicas)
 
-    await wait_for(migrated, timeout=180.0, interval=1.0,
-                   description=f"intent on {source}")
+    await wait_for(
+        migrated, timeout=180.0, interval=0.5, description=f"intent on {source}"
+    )
     intent = await get_intent(http_control, intent_id)
     assert intent is not None
     return intent
@@ -82,7 +95,9 @@ async def test_rolling_version_change(http_control, http_data_repo, stack, clean
     assert ready is not None
     old_instance_id = next(iter(replica_states(ready)))
 
-    update_intent_in_db(stack.db_env["control_db"], intent["id"], model_source=v2_source)
+    update_intent_in_db(
+        stack.db_env["control_db"], intent["id"], model_source=v2_source
+    )
 
     final = await _wait_model_source(http_control, intent["id"], v2_source)
     status = final["status"]
@@ -95,19 +110,39 @@ async def test_rolling_version_change(http_control, http_data_repo, stack, clean
     assert len(new_instance_ids) == 1
     assert final["status"]["replica_set"][0]["model_source"] == v2_source
 
+    # The v2 replica must actually serve inference (the old fixture's
+    # corrupt safetensors made every v2 replica a dead server).
+    body = await classify_until_ok(
+        http_control, final["alias"], stack=stack, timeout=30.0
+    )
+    assert body["model"] == final["alias"]
+    assert len(body["choices"]) == 1
+    assert body["choices"][0]["score"] > 0.0
 
-async def test_immediate_version_change(http_control, http_data_repo, stack, clean_state):
+
+async def test_immediate_version_change(
+    http_control, http_data_repo, stack, clean_state
+):
     """Same via strategy=immediate: converges to the new version, ready."""
     v2_source = await _register_v2(stack, http_data_repo)
     intent = await create_intent(http_control, alias=_alias(), strategy="immediate")
     await wait_intent_ready(http_control, intent["id"])
 
-    update_intent_in_db(stack.db_env["control_db"], intent["id"], model_source=v2_source)
+    update_intent_in_db(
+        stack.db_env["control_db"], intent["id"], model_source=v2_source
+    )
 
     final = await _wait_model_source(http_control, intent["id"], v2_source)
     assert final["status"]["phase"] == "ready"
     assert final["status"]["ready_replicas"] == 1
     assert final["status"]["updated_replicas"] == 1
+
+    # Liveness of the v2 replica (positive assertion per house rules).
+    body = await classify_until_ok(
+        http_control, final["alias"], stack=stack, timeout=30.0
+    )
+    assert body["model"] == final["alias"]
+    assert body["choices"][0]["score"] > 0.0
 
 
 async def test_delete_intent_cleans_up(http_control, clean_state):
@@ -124,7 +159,7 @@ async def test_delete_intent_cleans_up(http_control, clean_state):
     # finishes cleanup — poll for that, then assert the host-side cleanup.
     await wait_for(
         lambda: _soft_deleted(http_control, intent["id"]),
-        timeout=120.0,
+        timeout=15.0,
         interval=0.5,
         description="intent soft-deleted (API 404)",
     )
@@ -138,7 +173,7 @@ async def test_delete_intent_cleans_up(http_control, clean_state):
     await wait_for(
         lambda: _alias_gone(http_control, ready["alias"]),
         timeout=60.0,
-        interval=1.0,
+        interval=0.5,
         description="alias removed from registry",
     )
 
@@ -176,16 +211,20 @@ async def test_delete_orphan_keeps_instances(http_control, stack, clean_state):
 
     # The reconciler disowns the managed instance (markers cleared in the
     # Redis cache — the reconciler's view) and then transitions the intent
-    # to 'deleted' (deleted_at set) — the API 404s.
+    # to 'deleted' (deleted_at set) — the API 404s. The disown chain spans
+    # several passes, and the sequential loop may be held by a strategy
+    # health gate, so this wait gets headroom beyond the fast-path 15s.
     await wait_for(
         lambda: _soft_deleted(http_control, intent["id"]),
-        timeout=120.0,
+        timeout=45.0,
         interval=0.5,
         description="intent soft-deleted (API 404)",
     )
     cached = redis_cache_instances(stack.db_env["redis"], host_id)
     assert cached, "instance still present in the cache"
-    inst = next(i for i in cached if (i.get("id") or i.get("instance_id")) == instance_id)
+    inst = next(
+        i for i in cached if (i.get("id") or i.get("instance_id")) == instance_id
+    )
     assert inst.get("managed_by") not in ("intent",)
     assert inst.get("intent_id") not in (intent["id"],)
 

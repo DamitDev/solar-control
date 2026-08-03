@@ -31,7 +31,9 @@ def control_db_conn(database_url: str):
 def truncate_intents(database_url: str) -> None:
     """Delete every intent row (and gateway logs) — NOT the hosts table."""
     with control_db_conn(database_url) as conn, conn.cursor() as cur:
-        cur.execute("TRUNCATE intents, gateway_requests, gateway_events RESTART IDENTITY")
+        cur.execute(
+            "TRUNCATE intents, gateway_requests, gateway_events RESTART IDENTITY"
+        )
 
 
 def update_intent_in_db(database_url: str, intent_id: str, **fields: Any) -> None:
@@ -44,8 +46,17 @@ def update_intent_in_db(database_url: str, intent_id: str, **fields: Any) -> Non
     if not fields:
         return
     allowed = {
-        "alias", "model_source", "replicas", "priority", "strategy",
-        "backend", "placement", "resources", "metadata", "phase", "reconcile",
+        "alias",
+        "model_source",
+        "replicas",
+        "priority",
+        "strategy",
+        "backend",
+        "placement",
+        "resources",
+        "metadata",
+        "phase",
+        "reconcile",
     }
     unknown = set(fields) - allowed
     if unknown:
@@ -58,7 +69,9 @@ def update_intent_in_db(database_url: str, intent_id: str, **fields: Any) -> Non
             (*values, intent_id),
         )
         if cur.rowcount != 1:
-            raise AssertionError(f"intent {intent_id} not updated (rowcount={cur.rowcount})")
+            raise AssertionError(
+                f"intent {intent_id} not updated (rowcount={cur.rowcount})"
+            )
 
 
 def count_intents(database_url: str, alias: str | None = None) -> int:
@@ -90,7 +103,6 @@ async def register_host_via_api(
     Returns the host id. ``roles``/``gpu_type`` are stored in the DB row;
     the WS registration event later refreshes them from the host itself.
     """
-    import uuid
 
     payload: dict[str, Any] = {"name": name, "url": url, "api_key": api_key}
     if roles is not None:
@@ -98,7 +110,9 @@ async def register_host_via_api(
     if gpu_type is not None:
         payload["gpu_type"] = gpu_type
     resp = await http_control.post("/api/hosts", json=payload)
-    assert resp.status_code == 200, f"host registration failed: {resp.status_code} {resp.text}"
+    assert (
+        resp.status_code == 200
+    ), f"host registration failed: {resp.status_code} {resp.text}"
     body = resp.json()
     host_id = body["host"]["id"]
     logger.info("registered host %s id=%s", name, host_id)
@@ -132,9 +146,9 @@ async def register_model_in_data_repo(
     if metadata is not None:
         payload["metadata"] = metadata
     resp = await http_data_repo.post(f"/api/models/{name}/versions", json=payload)
-    assert resp.status_code == 201, (
-        f"data-repo registration failed: {resp.status_code} {resp.text}"
-    )
+    assert (
+        resp.status_code == 201
+    ), f"data-repo registration failed: {resp.status_code} {resp.text}"
     return resp.json()
 
 
@@ -146,9 +160,7 @@ def update_host_api_key(database_url: str, host_id: str, api_key: str) -> None:
     start failure for the RECREATE backoff path.
     """
     with control_db_conn(database_url) as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE hosts SET api_key = %s WHERE id = %s", (api_key, host_id)
-        )
+        cur.execute("UPDATE hosts SET api_key = %s WHERE id = %s", (api_key, host_id))
 
 
 def update_host_roles(database_url: str, host_id: str, roles: list[str]) -> None:
@@ -166,7 +178,9 @@ def update_host_roles(database_url: str, host_id: str, roles: list[str]) -> None
         )
 
 
-def count_host_requests(stack: Any, host_letter: str, method: str, path_part: str) -> int:
+def count_host_requests(
+    stack: Any, host_letter: str, method: str, path_part: str
+) -> int:
     """Count requests matching ``method`` + ``path_part`` in a host's log.
 
     Used for drift/stop-spam assertions: the host access log is the only

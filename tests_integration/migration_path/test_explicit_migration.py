@@ -8,7 +8,6 @@ import pytest
 
 from fixtures.constants import (
     BACKEND_CLASSIFICATION,
-    MODEL_ALIAS,
     MODEL_SOURCE_URI,
 )
 from fixtures.helpers import wait_for
@@ -37,7 +36,9 @@ async def _hosts(http_control) -> dict[str, dict]:
     return {h["name"]: h for h in hosts}
 
 
-async def _wait_status(http_control, host_id: str, instance_id: str, status: str) -> dict:
+async def _wait_status(
+    http_control, host_id: str, instance_id: str, status: str
+) -> dict:
     """Poll control's host-instance view until the instance reaches status."""
 
     async def reached() -> bool:
@@ -49,8 +50,12 @@ async def _wait_status(http_control, host_id: str, instance_id: str, status: str
                 return True
         return False
 
-    await wait_for(reached, timeout=120.0, interval=0.5,
-                   description=f"instance {instance_id} {status}")
+    await wait_for(
+        reached,
+        timeout=15.0,
+        interval=0.5,
+        description=f"instance {instance_id} {status}",
+    )
     resp = await http_control.get(f"/api/hosts/{host_id}/instances")
     assert resp.status_code == 200
     return next(i for i in resp.json() if i.get("id") == instance_id)
@@ -102,7 +107,11 @@ async def test_migrate_manual_instance(http_control, stack, clean_state):
     # Source stopped; target created with the same config.
     src_inst = await _wait_status(http_control, src["id"], instance_id, "stopped")
     assert _cfg(src_inst).get("alias") == alias
-    target_inst = next(i for i in await _host_instances(http_control, dst["id"]) if i["id"] == target_id)
+    target_inst = next(
+        i
+        for i in await _host_instances(http_control, dst["id"])
+        if i["id"] == target_id
+    )
     assert _cfg(target_inst).get("alias") == alias
     assert _cfg(target_inst).get("model_source") == MODEL_SOURCE_URI
     assert _cfg(target_inst).get("backend_type") == "huggingface_classification"
@@ -156,13 +165,12 @@ async def test_migrate_managed_instance_keeps_markers(http_control, stack, clean
             return False
         replicas = final["status"]["replica_set"]
         return any(
-            r["instance_id"] == target_id and r["host_id"] == dst_id
-            for r in replicas
+            r["instance_id"] == target_id and r["host_id"] == dst_id for r in replicas
         )
 
     await wait_for(
         target_in_replica_set,
         timeout=60.0,
-        interval=1.0,
+        interval=0.5,
         description="migrated target in intent replica_set",
     )

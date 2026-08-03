@@ -2,14 +2,16 @@
 
 Brings up (per session) ephemeral Postgres + Redis via testcontainers, a
 TLS stub Harbor speaking OCI Distribution, and Alembic migrations for both
-databases; then (per module) fresh data-repository / solar-control /
-solar-host ×2 uvicorn subprocesses wired to each other over loopback.
+databases; then (once per session) data-repository / solar-control /
+solar-host ×2 uvicorn subprocesses wired to each other over loopback. The
+wake test (3600s interval) builds its own stack and runs last.
 
 Fixture scopes
 --------------
 Session:  postgres_container, redis_container, stub_harbor, db_env,
-          alembic_data_repo, alembic_solar_control, stub_model_artifact
-Module:   stack (data-repo + control + host A + host B + model registration)
+          alembic_data_repo, alembic_solar_control, stub_model_artifact,
+          stack (data-repo + control + host A + host B + model registration)
+Module:   wake_stack (its own control with RECONCILE_INTERVAL_S=3600)
 Function: clean_state, http_data_repo, http_control, http_host, http_host_b
 
 The WS seam: hosts connect to control's ``/ws/host-channel`` at startup and
@@ -29,8 +31,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,7 +44,6 @@ import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 
 from fixtures.constants import (  # noqa: E402
-    BACKEND_CLASSIFICATION,
     DATA_REPOSITORY_API_KEY,
     FIXTURE_MODEL_DIR,
     HARBOR_PASSWORD,
@@ -52,9 +51,7 @@ from fixtures.constants import (  # noqa: E402
     HOST_A_API_KEY,
     HOST_B_API_KEY,
     MANAGEMENT_API_KEY,
-    MODEL_ALIAS,
     MODEL_NAME,
-    MODEL_SOURCE_URI,
     MODEL_VERSION,
 )
 from fixtures.helpers import (  # noqa: E402
@@ -68,7 +65,6 @@ from fixtures.helpers import (  # noqa: E402
     spawn_service,
     tail_service_logs,
     wait_for,
-    wait_for_sync,
 )
 from fixtures.seed import (  # noqa: E402
     register_host_via_api,
@@ -97,6 +93,10 @@ def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
             if folder in item.path.parts:
                 item.add_marker(getattr(pytest.mark, marker))
                 break
+    # The wake-stack module must run LAST: its stack build truncates the
+    # shared hosts table and it stops the session control, so any module
+    # after it would have no hosts to reconcile against.
+    items.sort(key=lambda item: item.path.name == "test_reconciler_wake.py")
 
 
 # ── Session scope ──────────────────────────────────────────────────
@@ -218,9 +218,9 @@ def _run_alembic(python: Path, cwd: Path, env: dict[str, str]) -> None:
         text=True,
         timeout=180,
     )
-    assert result.returncode == 0, (
-        f"alembic upgrade failed in {cwd}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"alembic upgrade failed in {cwd}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     logger.info("alembic upgrade head OK in %s", cwd.name)
 
 
@@ -374,6 +374,30 @@ class Stack:
         await _wait_host_online(self, f"host-{letter}")
         return url
 
+    def remove_extra_host(self, letter: str) -> None:
+        """Terminate an extra host and drop its DB row.
+
+        Used to restore the 2-host topology after the shortfall test: the
+        migration tests that follow assume exactly two hosts (their
+        "no target" displacement scenario must have no third host for the
+        MIGRATE target search to find).
+        """
+        svc = self.extra_hosts.pop(letter, None)
+        if svc is not None:
+            svc.terminate()
+        self.extra_host_urls.pop(letter, None)
+        import psycopg2
+
+        conn = psycopg2.connect(self.db_env["control_db"])
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM hosts WHERE name = %s", (f"host-{letter}",)
+                )
+        finally:
+            conn.close()
+
     async def respawn_data_repo(self) -> str:
         """Kill and re-spawn the data-repository subprocess (same port/env).
 
@@ -474,7 +498,14 @@ async def _build_stack(
         MANAGEMENT_API_KEY=MANAGEMENT_API_KEY,
         RECONCILE_INTERVAL_S=str(reconcile_interval_s),
         RECONCILE_HEALTH_GATE_TIMEOUT_S="5",
-        LOG_LEVEL="INFO",
+        # Fast pacing for the test env: the settle/cooldown windows exist to
+        # absorb WS-push latency (~ms here), and the registry refresh gates
+        # the ready alias — 1s keeps convergence snappy without racing.
+        RECONCILE_SETTLE_S="1.0",
+        RECONCILE_MIGRATE_SETTLE_S="3.0",
+        RECONCILE_DISPLACE_COOLDOWN_S="20.0",
+        REGISTRY_REFRESH_INTERVAL_S="1.0",
+        LOG_LEVEL=os.environ.get("TEST_LOG_LEVEL", "INFO"),
     )
     stack.control_env = control_env
     control, control_port = spawn_service(
@@ -593,9 +624,13 @@ async def _build_stack(
 
     # Gate: reconciler is blind until both hosts are connected + registered.
     await _wait_hosts_online(stack)
-    logger.info("stack ready: %s / %s / %s / %s",
-                stack.data_repo_url, stack.control_url,
-                stack.host_a_url, stack.host_b_url)
+    logger.info(
+        "stack ready: %s / %s / %s / %s",
+        stack.data_repo_url,
+        stack.control_url,
+        stack.host_a_url,
+        stack.host_b_url,
+    )
     return stack
 
 
@@ -626,8 +661,9 @@ async def _update_host_urls(stack: Stack) -> None:
 async def _wait_host_online(stack: Stack, name: str, timeout: float = 40.0) -> None:
     import httpx
 
-    async with httpx.AsyncClient(base_url=stack.control_url,
-                                 headers={"X-API-Key": MANAGEMENT_API_KEY}) as client:
+    async with httpx.AsyncClient(
+        base_url=stack.control_url, headers={"X-API-Key": MANAGEMENT_API_KEY}
+    ) as client:
 
         async def online() -> bool:
             resp = await client.get("/api/hosts")
@@ -637,8 +673,12 @@ async def _wait_host_online(stack: Stack, name: str, timeout: float = 40.0) -> N
             return rows.get(name, {}).get("status") == "online"
 
         try:
-            await wait_for(online, timeout=timeout, interval=0.25,
-                           description=f"host {name} online in control")
+            await wait_for(
+                online,
+                timeout=timeout,
+                interval=0.25,
+                description=f"host {name} online in control",
+            )
         except AssertionError:
             raise AssertionError(
                 f"host {name} never came online in control\n" + stack.tail()
@@ -654,16 +694,16 @@ async def _ensure_model_registered(stack: Stack) -> None:
     """Idempotently register the fixture model in data-repo (via its API)."""
     import httpx
 
-    async with httpx.AsyncClient(
-        base_url=stack.data_repo_url, timeout=10.0
-    ) as client:
+    async with httpx.AsyncClient(base_url=stack.data_repo_url, timeout=10.0) as client:
         resp = await client.get(f"/api/models/{MODEL_NAME}/versions")
         if resp.status_code == 200:
             versions = resp.json().get("versions", [])
             if any(v["version"] == MODEL_VERSION for v in versions):
                 return
         await register_model_in_data_repo(
-            client, name=MODEL_NAME, harbor_ref=stack.harbor_ref,
+            client,
+            name=MODEL_NAME,
+            harbor_ref=stack.harbor_ref,
             version=MODEL_VERSION,
         )
 
@@ -679,7 +719,7 @@ def _control_client(base_url: str):
     )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def stack(
     db_env: dict[str, str],
     stub_harbor,
@@ -688,12 +728,19 @@ def stack(
     alembic_solar_control,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Any:
-    """Fresh full stack per module (processes are module-scoped).
+    """One full stack for the whole session (previously per module).
+
+    Per-module stacks cost ~10-13s each (16 sequential 4-process spawns with
+    readiness gates) — the dominant cost of the suite. A single session
+    stack is safe because ``clean_state`` already resets per-test state
+    (instances, intents, volatile Redis) and no test kills a host; the only
+    module needing its own stack is the wake test (3600s interval), which is
+    reordered to run last and stops this stack's control first.
 
     Deliberately a *sync* fixture: pytest-asyncio's loop-scope machinery
-    re-creates module-scoped async generator fixtures per test event loop
-    (and then tears them down on a closed loop), which spawned one full
-    stack per test. ``asyncio.run`` wraps the one-shot async setup instead.
+    re-creates async generator fixtures per test event loop (and then tears
+    them down on a closed loop), which spawned one full stack per test.
+    ``asyncio.run`` wraps the one-shot async setup instead.
     """
     tmp_root = tmp_path_factory.mktemp("stack")
     harbor_ref, _files = stub_model_artifact
@@ -704,10 +751,12 @@ def stack(
         asyncio.run(_ensure_model_registered(stack))
         yield stack
     finally:
-        for svc in (
-            list(stack.extra_hosts.values())
-            + [stack.host_b, stack.host_a, stack.control, stack.data_repo]
-        ):
+        for svc in list(stack.extra_hosts.values()) + [
+            stack.host_b,
+            stack.host_a,
+            stack.control,
+            stack.data_repo,
+        ]:
             if svc is not None:
                 svc.terminate()
 
@@ -755,13 +804,18 @@ async def http_host_b(stack: Stack):
 
 
 async def _delete_all_instances(stack: Stack) -> None:
-    """Stop + delete every instance on both hosts (direct host API)."""
+    """Stop + delete every instance on all hosts (direct host API)."""
     import httpx
 
-    for url, api_key in (
+    targets: list[tuple[str, str]] = [
         (stack.host_a_url, HOST_A_API_KEY),
         (stack.host_b_url, HOST_B_API_KEY),
-    ):
+    ]
+    # Extra hosts (e.g. host-c from the shortfall test) persist for the rest
+    # of the session — clean them too, or their instances leak across tests.
+    for letter, url in stack.extra_host_urls.items():
+        targets.append((url, f"test-host-{letter}-key"))
+    for url, api_key in targets:
         async with httpx.AsyncClient(
             base_url=url, headers={"X-API-Key": api_key}, timeout=15.0
         ) as client:
@@ -796,16 +850,45 @@ async def _flush_volatile_redis(redis_url: str) -> None:
         await r.aclose()
 
 
+def _wipe_model_caches(stack: Stack) -> None:
+    """Wipe every host's model cache (MODELS_DIR/manifest.json + artifacts).
+
+    Hosts are session-scoped now, so their caches persist across tests;
+    several tests assert cold-cache behavior (first pull / pull counts).
+    Instances must already be deleted first — running model servers may
+    hold the files open.
+    """
+    import shutil
+
+    for letter in ("a", "b") + tuple(stack.extra_host_urls.keys()):
+        models_dir = stack.models_dir(letter)
+        if not models_dir.exists():
+            continue
+        for child in models_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+
+
 @pytest_asyncio.fixture
 async def clean_state(stack: Stack):
-    """Per-test slate: no intents, no instances, volatile Redis flushed."""
-    await _delete_all_instances(stack)
+    """Per-test slate: no intents, no instances, no model caches, Redis flushed.
+
+    Intents are truncated BEFORE instances are deleted: the session-scoped
+    reconciler reacts to instance deletions within one tick (0.5s) and would
+    otherwise see a shortfall for the just-deleted intent and start a CREATE
+    pull that races the cache wipe (re-creating the model dir after it).
+    """
     truncate_intents(stack.db_env["control_db"])
+    await _delete_all_instances(stack)
+    _wipe_model_caches(stack)
     await _flush_volatile_redis(stack.db_env["redis"])
     stack.stub_harbor.reset()
     yield
     # Teardown: leave nothing behind for the next test.
-    await _delete_all_instances(stack)
     truncate_intents(stack.db_env["control_db"])
+    await _delete_all_instances(stack)
+    _wipe_model_caches(stack)
     await _flush_volatile_redis(stack.db_env["redis"])
     stack.stub_harbor.reset()

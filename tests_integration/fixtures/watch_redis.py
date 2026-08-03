@@ -6,6 +6,7 @@ redis container appears), then tails MONITOR for solar:hosts:* writes.
 
 Usage: watch_redis.py <outfile>
 """
+
 import subprocess
 import sys
 import time

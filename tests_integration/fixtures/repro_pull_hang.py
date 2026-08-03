@@ -9,8 +9,6 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-import threading
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -40,9 +38,7 @@ def main() -> int:
     print(f"stub on {base}, v1+v2 registered")
 
     # 2. Host pull_model in a subprocess (pebble) — same env shape as the suite
-    env = {
-        k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")
-    }
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
     env.update(
         {
             "SSL_CERT_FILE": str(ca),

@@ -22,7 +22,9 @@ async def _host_a(http_control):
     return next(h for h in hosts if h["name"] == "host-a")
 
 
-async def test_distribute_pulls_once_and_caches(http_control, http_host, stack, clean_state):
+async def test_distribute_pulls_once_and_caches(
+    http_control, http_host, stack, clean_state
+):
     """First distribute pulls from Harbor; second is a cache hit, no re-pull."""
     host = await _host_a(http_control)
     stack.stub_harbor.reset()
@@ -37,12 +39,17 @@ async def test_distribute_pulls_once_and_caches(http_control, http_host, stack, 
     assert results[0]["source_uri"] == MODEL_SOURCE_URI
     assert results[0]["cached"] is False
     # Path is the absolute pulled directory on the host (slug dir).
-    assert results[0]["path"].endswith(f"repo--{MODEL_NAME}--{MODEL_VERSION}"), (
-        results[0]["path"]
-    )
+    assert results[0]["path"].endswith(f"repo--{MODEL_NAME}--{MODEL_VERSION}"), results[
+        0
+    ]["path"]
 
     # Host pulled from (stub) Harbor via ORAS: manifests + blob GETs.
-    assert stack.stub_harbor.count_requests("GET", f"/v2/supernova/{MODEL_NAME}/manifests/") >= 1
+    assert (
+        stack.stub_harbor.count_requests(
+            "GET", f"/v2/supernova/{MODEL_NAME}/manifests/"
+        )
+        >= 1
+    )
     blob_pulls = stack.stub_harbor.count_requests("GET", "/blobs/")
     assert blob_pulls >= 1, "host never downloaded blobs"
 
@@ -66,12 +73,14 @@ async def test_distribute_pulls_once_and_caches(http_control, http_host, stack, 
     assert resp.status_code == 200, resp.text
     results = resp.json()
     assert results[0]["cached"] is True
-    assert len(stack.stub_harbor.received_requests()) == harbor_before, (
-        "second distribute re-pulled from Harbor despite cached manifest"
-    )
+    assert (
+        len(stack.stub_harbor.received_requests()) == harbor_before
+    ), "second distribute re-pulled from Harbor despite cached manifest"
 
 
-async def test_manifest_round_trips_repo_metadata(http_control, http_host, stack, clean_state):
+async def test_manifest_round_trips_repo_metadata(
+    http_control, http_host, stack, clean_state
+):
     """Data-repo metadata (name, version, checksum) lands in the host manifest."""
     host = await _host_a(http_control)
     resp = await http_control.post(

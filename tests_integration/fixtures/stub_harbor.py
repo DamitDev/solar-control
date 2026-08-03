@@ -51,7 +51,9 @@ _TOKEN = "stub-harbor-test-token"
 _SERVICE = "harbor-registry"
 
 # repo ref path pattern: /v2/{repository}/manifests|blobs/{reference}
-_PATH_RE = re.compile(r"^/v2/(?P<repo>[^/]+(?:/[^/]+)*)/(?P<kind>manifests|blobs)/(?P<ref>[^/]+)$")
+_PATH_RE = re.compile(
+    r"^/v2/(?P<repo>[^/]+(?:/[^/]+)*)/(?P<kind>manifests|blobs)/(?P<ref>[^/]+)$"
+)
 
 
 def sha256_digest(data: bytes) -> str:
@@ -92,7 +94,9 @@ class _StubHarborState:
         with self._lock:
             self.requests = []
 
-    def register_model(self, harbor_ref: str, files: dict[str, bytes]) -> dict[str, Any]:
+    def register_model(
+        self, harbor_ref: str, files: dict[str, bytes]
+    ) -> dict[str, Any]:
         """Register an artifact. ``harbor_ref`` e.g. ``127.0.0.1:PORT/supernova/test-model:v1``.
 
         Returns the manifest dict (with its digest under ``_digest``).
@@ -180,7 +184,9 @@ class StubHarborHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _send_json(self, status: int, obj: Any, extra: dict[str, str] | None = None) -> None:
+    def _send_json(
+        self, status: int, obj: Any, extra: dict[str, str] | None = None
+    ) -> None:
         body = json.dumps(obj).encode()
         headers = {"Content-Type": "application/json"}
         if extra:
@@ -248,8 +254,11 @@ class StubHarborHandler(BaseHTTPRequestHandler):
 
         m = _PATH_RE.match(path)
         if not m:
-            self._send(404, b'{"errors":[{"code":"UNSUPPORTED","message":"not found"}]}',
-                       {"Content-Type": "application/json"})
+            self._send(
+                404,
+                b'{"errors":[{"code":"UNSUPPORTED","message":"not found"}]}',
+                {"Content-Type": "application/json"},
+            )
             return
 
         if not self._has_bearer():
@@ -291,12 +300,20 @@ class StubHarborHandler(BaseHTTPRequestHandler):
 
     def _handle_token(self) -> None:
         if not self._has_basic():
-            self._send(401, b'{"errors":[{"code":"UNAUTHORIZED","message":"auth required"}]}',
-                       {"Content-Type": "application/json"})
+            self._send(
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED","message":"auth required"}]}',
+                {"Content-Type": "application/json"},
+            )
             return
         self._send_json(
             200,
-            {"token": _TOKEN, "access_token": _TOKEN, "expires_in": 300, "issued_at": "now"},
+            {
+                "token": _TOKEN,
+                "access_token": _TOKEN,
+                "expires_in": 300,
+                "issued_at": "now",
+            },
         )
 
 
@@ -355,7 +372,9 @@ class StubHarbor:
     def base_url(self) -> str:
         return self.state.base_url
 
-    def register_model(self, harbor_ref: str, files: dict[str, bytes]) -> dict[str, Any]:
+    def register_model(
+        self, harbor_ref: str, files: dict[str, bytes]
+    ) -> dict[str, Any]:
         return self.state.register_model(harbor_ref, files)
 
     def received_requests(self) -> list[tuple[str, str, dict[str, str]]]:

@@ -256,6 +256,13 @@ class IntentDB:
             if row.deleted_at is not None:
                 return None
             if phase is not None:
+                # "deleting" is terminal: nothing but "deleted" may move it.
+                # A stale reconcile pass (e.g. a settle-window status refresh
+                # racing the DELETE) must never resurrect a deleting intent —
+                # otherwise the reconciler recreates forever and the soft
+                # delete never completes.
+                if row.phase == "deleting" and phase != "deleted":
+                    phase = "deleting"
                 row.phase = phase
                 # Auto-soft-delete when the reconciler confirms cleanup
                 if phase == "deleted":

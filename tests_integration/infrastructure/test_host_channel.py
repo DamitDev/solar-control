@@ -13,7 +13,6 @@ import pytest
 
 from fixtures.constants import (
     BACKEND_CLASSIFICATION,
-    MODEL_ALIAS,
     MODEL_SOURCE_URI,
 )
 from fixtures.helpers import wait_for
@@ -54,7 +53,9 @@ async def test_hosts_connect_and_report_health(http_control, clean_state):
     assert body.get("reachable_hosts", 0) >= 2, body
 
 
-async def test_instances_update_populates_redis(http_control, http_host, stack, clean_state):
+async def test_instances_update_populates_redis(
+    http_control, http_host, stack, clean_state
+):
     """Instance create/stop on host -> instances_update -> control's view."""
     alias = f"ws-{uuid.uuid4().hex[:8]}"
     # The host refuses repo:// sources until the model is pulled; distribute
@@ -73,9 +74,7 @@ async def test_instances_update_populates_redis(http_control, http_host, stack, 
     # the host's model manifest and pass it as a local:// source.
     resp = await http_host.get("/models")
     assert resp.status_code == 200, resp.text
-    entry = next(
-        m for m in resp.json() if m.get("source_uri") == MODEL_SOURCE_URI
-    )
+    entry = next(m for m in resp.json() if m.get("source_uri") == MODEL_SOURCE_URI)
     slug = entry["path"].rstrip("/").split("/")[-1]
 
     payload = _instance_payload(alias)
@@ -91,8 +90,12 @@ async def test_instances_update_populates_redis(http_control, http_host, stack, 
             return False
         return any(i.get("id") == instance_id for i in r.json())
 
-    await wait_for(visible, timeout=60.0, interval=0.5,
-                   description="instance visible in control's host view")
+    await wait_for(
+        visible,
+        timeout=60.0,
+        interval=0.5,
+        description="instance visible in control's host view",
+    )
     resp = await http_control.get(f"/api/hosts/{host_a['id']}/instances")
     inst = next(i for i in resp.json() if i["id"] == instance_id)
     # Control's host view proxies the host's live Instance model: alias is

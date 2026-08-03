@@ -23,7 +23,6 @@ Output files (committed to the repo):
 
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -51,7 +50,11 @@ def build_vocab() -> list[str]:
 
 
 def main() -> int:
-    from transformers import BertConfig, BertForSequenceClassification, BertTokenizerFast
+    from transformers import (
+        BertConfig,
+        BertForSequenceClassification,
+        BertTokenizerFast,
+    )
 
     out = _OUT_DIR
     if out.exists():

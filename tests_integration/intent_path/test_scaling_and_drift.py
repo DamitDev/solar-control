@@ -17,7 +17,6 @@ from fixtures.intents import (
     get_intent,
     replica_hosts,
     replica_states,
-    wait_intent_phase,
     wait_intent_ready,
 )
 from fixtures.seed import count_host_requests, update_intent_in_db
@@ -58,8 +57,8 @@ async def test_drift_stopped_instance_recreated(http_control, stack, clean_state
     # Reconciler RECREATE: restarts in place. Poll for running again.
     await wait_for(
         lambda: _replica_running(http_control, intent["id"], instance_id),
-        timeout=120.0,
-        interval=1.0,
+        timeout=15.0,
+        interval=0.5,
         description=f"replica {instance_id} recreated/running",
     )
 
@@ -71,9 +70,9 @@ async def test_drift_stopped_instance_recreated(http_control, stack, clean_state
         f"reconciler issued extra stops ({stops_after - stops_before}); "
         "RECREATE must restart, not stop"
     )
-    assert starts_after - starts_before == 1, (
-        f"expected exactly 1 start after drift, got {starts_after - starts_before}"
-    )
+    assert (
+        starts_after - starts_before == 1
+    ), f"expected exactly 1 start after drift, got {starts_after - starts_before}"
 
     intent = await get_intent(http_control, intent["id"])
     assert intent is not None
@@ -102,8 +101,8 @@ async def test_scale_down_surplus_stop(http_control, stack, clean_state):
     # Converges to a single managed replica, still ready.
     await wait_for(
         lambda: _observed_is(http_control, intent["id"], 1),
-        timeout=120.0,
-        interval=1.0,
+        timeout=15.0,
+        interval=0.5,
         description="intent scaled down to 1 replica",
     )
     final = await get_intent(http_control, intent["id"])
@@ -151,8 +150,8 @@ async def test_shortfall_degraded(http_control, stack, clean_state):
 
     await wait_for(
         degraded_with_shortfall,
-        timeout=120.0,
-        interval=1.0,
+        timeout=15.0,
+        interval=0.5,
         description="intent degraded with shortfall",
     )
 
@@ -161,8 +160,8 @@ async def test_shortfall_degraded(http_control, stack, clean_state):
     # (2 replicas on 2 hosts) rather than asserting immediately.
     await wait_for(
         lambda: _placed(http_control, intent["id"], 2),
-        timeout=120.0,
-        interval=1.0,
+        timeout=15.0,
+        interval=0.5,
         description="two replicas placed on two hosts",
     )
     current = await get_intent(http_control, intent["id"])
@@ -177,3 +176,8 @@ async def test_shortfall_degraded(http_control, stack, clean_state):
     assert final is not None
     assert len(replica_hosts(final)) == 3
     assert final["status"]["shortfall"] == 0
+
+    # Restore the 2-host topology: the migration tests that follow assume
+    # exactly two hosts (their "no target" displacement scenario must have
+    # no third host for the MIGRATE target search to find).
+    stack.remove_extra_host("c")

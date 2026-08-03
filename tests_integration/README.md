@@ -78,8 +78,9 @@ env -u PYTHONPATH .venv/bin/python -m pytest -c tests_integration/pytest.ini \
     tests_integration/intent_path/test_reconcile_to_ready.py -v
 ```
 
-A full run takes roughly 8–15 minutes (each test module spawns a fresh
-4-process stack; inference tests load torch per instance start).
+A full run takes roughly 2–3 minutes (one session-scoped 4-process stack is
+reused by every module; per-test state is reset by `clean_state`). The wake
+test builds its own 3600s-interval stack and runs last.
 
 ## Layout
 
@@ -138,8 +139,16 @@ env -u PYTHONPATH ../solar-host/.venv/bin/python \
   re-created per test loop otherwise (one full stack per test).
 - **Startup race:** the host marks instances RUNNING ~2s after spawn, before
   torch/transformers finish loading. Inference tests gate on the gateway
-  actually routing (`/v1/models` through control queries the instance
-  upstream) before firing `/v1/classify`.
+  registry listing the alias, then retry `/v1/classify` with a bounded
+  budget (`classify_until_ok` in `fixtures/intents.py`) — see "The
+  classify-404 flake" below.
+- **`GET /v1/models` does NOT prove liveness.** The gateway fabricates a
+  fallback entry for an alias whenever the upstream query fails
+  (`app/gateway.py get_available_models`), so a crashed server keeps the
+  alias listed as long as it lingers in the registry. All registry-derived
+  gates (`_alias_visible`, `ready_replicas`, `Available`) can therefore
+  regress mid-run; the classify retry is what actually absorbs the
+  remaining startup/crash window.
 - **Soft-deleted intents 404.** `GET /api/intents/{id}` returns 404 for
   soft-deleted rows, so delete tests poll for the 404 rather than a
   `deleted` phase.
@@ -152,13 +161,92 @@ env -u PYTHONPATH ../solar-host/.venv/bin/python \
 - **No PUT `/api/intents/{id}`** (spec §12.5): strategy/scale tests mutate
   the `intents` row directly via `update_intent_in_db` (documented,
   intentional).
+- **One session-scoped stack; the wake test runs last.** The stack fixture
+  is session-scoped (per-module stacks cost ~10-13s each — 16 sequential
+  4-process spawns dominated the runtime). `clean_state` already resets
+  per-test state and no test kills a host, so sharing is safe. The wake
+  module (3600s interval) is reordered to run last
+  (`pytest_collection_modifyitems`): it truncates the shared hosts table and
+  stops the session control (two live controls sharing Postgres/Redis
+  cross-reconcile — a second control resolves "host-a" to the other stack's
+  host and races every intent). `test_failed_create_backoff` lives in its
+  own module because it needs a live control.
 - **Version-change artifacts:** `_register_v2` registers a second version
-  with identical files except a modified `model.safetensors` (idempotent —
-  the data-repo rejects a duplicate registration with 409).
+  with identical tensors but a different `model.safetensors` (re-saved with
+  a `version: v2` header entry via `rewrite_safetensors_with_metadata` —
+  valid file, different sha256). v2 replicas therefore actually serve
+  inference, and the strategy tests assert classify liveness on the new
+  version (idempotent — the data-repo rejects a duplicate registration
+  with 409).
 - **Cleanup on failure:** `clean_state` stops+deletes all host instances,
   truncates `intents`, flushes volatile Redis keys (keeps `solar:hosts:*`
   connection state), and resets the stub Harbor request log. On fixture
   failure the stack log tails are dumped via `stack.tail()`.
+
+## The classify-404 flake (D-017, fixed)
+
+Intermittent failure of `test_intent_reaches_ready`: the HF classification
+server crashes at startup (tokenizer slow→fast conversion error — see
+below) while the host has already reported the instance RUNNING; the
+gateway registry drops the dead instance on the next refresh and
+`POST /v1/classify` returns 404 `"Model '…' not found or no instances
+available"` (`attempted == ∅`). The 93ms window in the observed failure:
+`/v1/models` listed the alias (fabricated fallback entry, `gateway.py
+get_available_models`) at 09:57:08.264 while the upstream was already
+dead; the next registry refresh dropped the instance and the classify at
+09:57:08.357 404'd.
+
+The suite fixes, all proven load-bearing by deterministic fault injection
+(SIGKILL the `hf_server` subprocess, one run per variant):
+
+| Injection | Old behavior | New behavior |
+|---|---|---|
+| SIGKILL after alias visible, **one** classify | 404 (flake signature) | — |
+| Same, **bounded retry** (`classify_until_ok`, 30s) | — | self-heals via reconciler §8.2 RECREATE in ~3.6s |
+| SIGKILL at spawn (before ready), 15s ready-wait | times out (15.2s) | 30s ready-wait + retry converge (15.2s) |
+
+The host reports a killed instance as `failed` ("Process exited
+unexpectedly") → the reconciler RECREATEs: first attempt at the next
+0.5s tick (post-ready kill ≈ 3.6s convergence), with the exponential
+backoff (`_BACKOFF_MIN_S = 10`) after a failed start (spawn-kill ≈ 15.2s).
+The retry cannot ride a *repeatedly* failing recreate (corrupt cached
+artifact → restart-in-place re-reads the same bytes) — that case is
+expected to produce the evidence dump, not a pass.
+
+**Evidence preservation:** on classify exhaustion, `dump_instance_evidence`
+(`fixtures/helpers.py`) writes `stack0/evidence-<alias>/` with the
+instance server logs, sha256 of every pulled file vs the committed
+fixture, the gateway registry entries (`supported_endpoints` — separates
+the routing trap from a dead server), direct upstream probes (fallback vs
+live), and host venv package versions. A loop hit should produce this
+dump, not a bare 404.
+
+**Fail-fast on the routing trap:** a 404 with `attempted == ∅` while the
+registry still has the alias but no entry supports `/v1/classify` aborts
+immediately (the reconciler cannot fix a missing endpoint).
+
+**Tokenizer crash background (F6):** the venv (transformers 5.14.1 /
+tokenizers 0.22.2 / torch 2.13.0 / safetensors 0.8.0) has no
+sentencepiece/tiktoken; a slow→fast tokenizer conversion fallback crashes
+with "You need to have sentencepiece or tiktoken installed". 18/18
+isolated cold loads pass, so the trigger is suite-context (pulled copy or
+timing), not plain nondeterminism. `solar-host` post-pull sha256
+verification against OCI manifest layer digests (Task 4) catches the
+truncated-pull leg at the source.
+
+## WS instances_update seam (F5 — investigation outcome)
+
+The suite exercises the **HTTP-poll fallback** for the gateway registry,
+not the WS `instances_update` seam: control logs "Host … is connected but
+has no cached instances; polling HTTP" continuously, because the
+`instances_update` → Redis cache path never populates with the current
+`solar-host` `feature/D-017` checkout. The host-side fixes for this
+(registration/health re-send after approval; immediate instances_update
+push on instance changes) exist only as an unpushed commit
+(`eeacbe9 fix(ws_client)` on `fix/d017-host-fixes`) — see the Task 8
+finding in the flake plan. The registry is carried entirely by
+`refresh_model_registry`'s HTTP polling, which is why every test still
+passes; the WS seam should be re-verified once the host fixes are merged.
 
 ## Known deviations from the plan (documented)
 

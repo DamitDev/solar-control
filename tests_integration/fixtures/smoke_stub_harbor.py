@@ -41,26 +41,67 @@ def _make_certs(cert_dir: str) -> tuple[str, str]:
     def run(*args: str) -> None:
         subprocess.run(args, check=True, capture_output=True)
 
-    run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", ca_key,
-        "-out", ca_crt, "-days", "30", "-nodes",
-        "-subj", "/CN=StubHarbor Test CA",
-        "-addext", "basicConstraints=critical,CA:TRUE",
-        "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-    run("openssl", "req", "-newkey", "rsa:2048", "-keyout", srv_key,
-        "-out", srv_csr, "-nodes", "-subj", "/CN=127.0.0.1")
+    run(
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-keyout",
+        ca_key,
+        "-out",
+        ca_crt,
+        "-days",
+        "30",
+        "-nodes",
+        "-subj",
+        "/CN=StubHarbor Test CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+    )
+    run(
+        "openssl",
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-keyout",
+        srv_key,
+        "-out",
+        srv_csr,
+        "-nodes",
+        "-subj",
+        "/CN=127.0.0.1",
+    )
     with open(ext, "w") as f:
         f.write(
             "subjectAltName=IP:127.0.0.1\n"
             "keyUsage=digitalSignature,keyEncipherment\n"
             "extendedKeyUsage=serverAuth\n"
         )
-    run("openssl", "x509", "-req", "-in", srv_csr, "-CA", ca_crt, "-CAkey", ca_key,
-        "-CAcreateserial", "-out", srv_crt, "-days", "30", "-extfile", ext)
+    run(
+        "openssl",
+        "x509",
+        "-req",
+        "-in",
+        srv_csr,
+        "-CA",
+        ca_crt,
+        "-CAkey",
+        ca_key,
+        "-CAcreateserial",
+        "-out",
+        srv_crt,
+        "-days",
+        "30",
+        "-extfile",
+        ext,
+    )
     return srv_crt, srv_key
 
 
 def main() -> int:
-    import tempfile
 
     stub = StubHarbor()
     cert_dir = tempfile.mkdtemp(prefix="stub-harbor-certs-")
@@ -106,7 +147,9 @@ def main() -> int:
         client = HarborClient(base_url=base, username="robot$test", password="test")
         try:
             info = await client.verify_artifact(harbor_ref)
-            print(f"HarborClient.verify_artifact -> digest={info.digest[:20]}... len={info.content_length}")
+            print(
+                f"HarborClient.verify_artifact -> digest={info.digest[:20]}... len={info.content_length}"
+            )
             assert info.digest.startswith("sha256:")
             assert info.content_length > 0
         finally:
@@ -125,8 +168,12 @@ def main() -> int:
     reqs = stub.received_requests()
     print(f"\nrequest log ({len(reqs)} entries):")
     for method, path, headers in reqs:
-        auth = "Bearer" if headers.get("Authorization", "").startswith("Bearer") else (
-            "Basic" if headers.get("Authorization", "").startswith("Basic") else "-"
+        auth = (
+            "Bearer"
+            if headers.get("Authorization", "").startswith("Bearer")
+            else (
+                "Basic" if headers.get("Authorization", "").startswith("Basic") else "-"
+            )
         )
         print(f"  {method:5} {path:60} auth={auth}")
 

@@ -7,7 +7,7 @@ import uuid
 import pytest
 
 from fixtures.constants import MODEL_SOURCE_URI
-from fixtures.intents import create_intent, get_intent, intent_payload
+from fixtures.intents import create_intent, intent_payload
 
 pytestmark = pytest.mark.intent_path
 

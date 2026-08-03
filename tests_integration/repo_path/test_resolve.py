@@ -58,9 +58,9 @@ async def test_control_resolve_calls_data_repo_not_harbor(
     # (OrasHelper), not control. Control has no Harbor credentials and no
     # OCI client path — the only clients are data-repo and the hosts.
     paths = stack.stub_harbor.received_paths()
-    assert any("/blobs/" in p for p in paths), (
-        "expected host pull blobs after distribute, got: " + str(paths)
-    )
+    assert any(
+        "/blobs/" in p for p in paths
+    ), "expected host pull blobs after distribute, got: " + str(paths)
 
 
 async def _data_repo_resolve_calls(stack) -> int:
