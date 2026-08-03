@@ -9,6 +9,7 @@ from . import (
     instances,
     reservations,
     intents,
+    catalog,
 )
 
 router = APIRouter(prefix="/api", tags=["management"])
@@ -21,3 +22,4 @@ router.include_router(resources.router)
 router.include_router(instances.router)
 router.include_router(reservations.router)
 router.include_router(intents.router)
+router.include_router(catalog.router)

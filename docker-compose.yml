@@ -45,6 +45,9 @@ services:
       - PORT=${PORT:-8000}
       - DATABASE_URL=postgresql://solar:solar@postgres:5432/solar_gateway
       - REDIS_URL=redis://redis:6379/0
+      - DATA_REPOSITORY_URL=${DATA_REPOSITORY_URL:-}
+      - DATA_REPOSITORY_API_KEY=${DATA_REPOSITORY_API_KEY:-}
+      - DATA_REPOSITORY_TIMEOUT_S=${DATA_REPOSITORY_TIMEOUT_S:-10}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

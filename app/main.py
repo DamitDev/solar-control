@@ -173,6 +173,7 @@ async def root():
                 "/api/resources/reservations",
                 "/api/intents",
                 "/api/intents/{id}",
+                "/api/catalog/models",
             ],
             "realtime": [
                 "Socket.IO /hosts (host connections)",
