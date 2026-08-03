@@ -1,0 +1,20 @@
+# Test dependencies for the D-017 cross-service integration suite.
+#
+# The pytest process runs inside solar-control's venv (which already has
+# fastapi, psycopg2-binary, redis, python-socketio, sqlalchemy, aiohttp).
+# The three service subprocesses run from their own venvs:
+#   - data-repository/.venv      (requirements.txt)
+#   - solar-control/.venv        (requirements.txt)
+#   - solar-host/.venv           (requirements-dev.txt — includes the
+#                                 huggingface extra: torch + transformers)
+#
+# Install:
+#   env -u PYTHONPATH .venv/bin/pip install -r tests_integration/requirements.txt
+#
+# Regenerate the committed HF model fixture with:
+#   env -u PYTHONPATH ../solar-host/.venv/bin/python \
+#       tests_integration/fixtures/generate_test_model.py
+pytest>=8.0
+pytest-asyncio>=0.23
+testcontainers[postgres,redis]>=4.0
+httpx>=0.27
