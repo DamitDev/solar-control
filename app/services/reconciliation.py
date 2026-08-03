@@ -325,7 +325,9 @@ class Reconciler:
             t_upd = time.monotonic()
             await self._update_status(intent, observed, last_error=last_error)
             logger.debug(
-                "update_status for %s took %.1fs", intent.id[:8], time.monotonic() - t_upd
+                "update_status for %s took %.1fs",
+                intent.id[:8],
+                time.monotonic() - t_upd,
             )
             return
 

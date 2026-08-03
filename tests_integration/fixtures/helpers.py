@@ -527,7 +527,14 @@ async def dump_instance_evidence(
         timeout=60,
         env=env,
     )
-    wanted = ("tokenizers", "sentencepiece", "tiktoken", "transformers", "torch==", "safetensors")
+    wanted = (
+        "tokenizers",
+        "sentencepiece",
+        "tiktoken",
+        "transformers",
+        "torch==",
+        "safetensors",
+    )
     if proc.returncode == 0:
         lines.append("host venv versions (pip freeze grep):")
         for line in proc.stdout.splitlines():
@@ -536,7 +543,9 @@ async def dump_instance_evidence(
     else:
         lines.append(f"host venv pip freeze failed: {proc.stderr[:200]}")
 
-    (evidence_dir / "evidence.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (evidence_dir / "evidence.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
     logger.warning("classify-failure evidence dumped to %s", evidence_dir)
     return evidence_dir
 

@@ -186,12 +186,14 @@ async def classify_until_ok(
             and _ROUTING_TRAP_DETAIL in resp.text
             and stack is not None
         ):
-            from fixtures.helpers import dump_instance_evidence, registry_entries_for_alias
+            from fixtures.helpers import (
+                dump_instance_evidence,
+                registry_entries_for_alias,
+            )
 
             entries = await registry_entries_for_alias(stack.db_env["redis"], alias)
             if entries and not any(
-                "/v1/classify" in (e.get("supported_endpoints") or [])
-                for e in entries
+                "/v1/classify" in (e.get("supported_endpoints") or []) for e in entries
             ):
                 evidence = await dump_instance_evidence(
                     stack, alias, registry_entries=entries
@@ -212,4 +214,6 @@ async def classify_until_ok(
             f"classify {alias!r} never succeeded within {timeout}s; evidence in "
             f"{evidence}. {tail}"
         )
-    raise AssertionError(f"classify {alias!r} never succeeded within {timeout}s. {tail}")
+    raise AssertionError(
+        f"classify {alias!r} never succeeded within {timeout}s. {tail}"
+    )

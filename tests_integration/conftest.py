@@ -392,9 +392,7 @@ class Stack:
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM hosts WHERE name = %s", (f"host-{letter}",)
-                )
+                cur.execute("DELETE FROM hosts WHERE name = %s", (f"host-{letter}",))
         finally:
             conn.close()
 
