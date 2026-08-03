@@ -90,6 +90,15 @@ class OpenAIGateway:
                     instance.get("backend_type", "llamacpp"),
                 ),
                 "api_key": config.get("api_key"),
+                # Ownership/identity fields the reconciler relies on —
+                # without them a re-seeded cache entry looks unmanaged and
+                # the reconciler re-creates duplicates (one-per-host
+                # violated, surplus cleanup races in-flight starts).
+                "managed_by": instance.get("managed_by"),
+                "intent_id": instance.get("intent_id"),
+                "model_source": config.get("model_source")
+                or instance.get("model_source"),
+                "priority": instance.get("priority"),
             }
             if context_size is not None:
                 item["ctx_size"] = context_size

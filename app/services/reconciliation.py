@@ -16,6 +16,7 @@ Design:
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -79,6 +80,11 @@ class Reconciler:
         self._running = False
         # Per-intent exponential backoff: {intent_id: {"failures": N, "next_retry_at": iso}}
         self._backoff: dict[str, dict[str, Any]] = {}
+        # Per-intent settle window (monotonic deadline) after CREATE/MIGRATE
+        # so the host's WS instances_update lands before the next diff —
+        # otherwise the stale observed state diffs a duplicate CREATE whose
+        # start is then SIGTERM'd by the surplus cleanup (-15/404 races).
+        self._settle_until: dict[str, float] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────
 
@@ -209,6 +215,14 @@ class Reconciler:
             logger.debug("Intent %s in backoff, skipping", intent.id)
             return
 
+        # Settle window: skip diffing right after a CREATE/MIGRATE so the
+        # host's WS push lands before we re-observe (closes the
+        # duplicate-create window; still refresh status).
+        if time.monotonic() < self._settle_until.get(intent.id, 0.0):
+            logger.debug("Intent %s in settle window, skipping diff", intent.id)
+            await self._update_status(intent, await self._observe(intent))
+            return
+
         # 1. Observe
         observed = await self._observe(intent)
 
@@ -238,6 +252,7 @@ class Reconciler:
                 if action.type in (ActionType.CREATE, ActionType.MIGRATE) and result:
                     await asyncio.sleep(0.5)
                     observed = await self._observe(intent)
+                    self._settle_until[intent.id] = time.monotonic() + 3.0
             except Exception as e:  # noqa: BLE001
                 logger.error(
                     "Action %s failed for intent %s: %s",
@@ -300,6 +315,9 @@ class Reconciler:
             if action.type in (ActionType.CREATE, ActionType.MIGRATE) and result:
                 await asyncio.sleep(0.5)
                 observed = await self._observe(intent)
+                # Let the host's WS instances_update land before the next
+                # diff (see _settle_until above).
+                self._settle_until[intent.id] = time.monotonic() + 3.0
         except Exception as e:  # noqa: BLE001
             logger.error(
                 "Action %s failed for intent %s: %s",
@@ -938,7 +956,13 @@ class Reconciler:
                     if isinstance(cfg, dict):
                         cfg.pop("managed_by", None)
                         cfg.pop("intent_id", None)
-                        inst["config"] = cfg
+                        # Flat WS cache entries have no nested "config"; the
+                        # fallback makes cfg == inst, so assigning it back
+                        # would create a self-referential dict that json
+                        # serialization rejects ("Circular reference
+                        # detected"). Only re-attach real nested configs.
+                        if cfg is not inst:
+                            inst["config"] = cfg
                     inst.pop("managed_by", None)
                     inst.pop("intent_id", None)
                     found = True
@@ -1501,6 +1525,14 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:
 
     Compares the intent's backend fields (excluding identity/server-derived
     fields) against the instance config for the same keys.
+
+    NB: the WS instances cache is intentionally flat (id/alias/status/port/
+    backend_type/model_source/... only — see gateway._ws_cache_from_http_
+    instances and the host's send_instances_update), so most backend fields
+    (device, dtype, max_length, labels) are never visible here. Fields that
+    are absent from the cache entry are skipped; comparing them as None
+    would report drift on every managed instance and trigger a REPLACE-stop
+    loop (the pre-fix behavior).
     """
     intent_backend = intent.backend if isinstance(intent.backend, dict) else {}
     _skip_keys = {
@@ -1518,6 +1550,8 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:
     for key, value in intent_backend.items():
         if key in _skip_keys:
             continue
+        if key not in instance_config:
+            continue  # flat WS cache does not carry this field
         inst_value = instance_config.get(key)
         if inst_value != value:
             return True
