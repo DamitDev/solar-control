@@ -119,19 +119,23 @@ def validate_resolved_model(payload: dict[str, Any], source_uri: str) -> None:
         raise HTTPException(
             status_code=422,
             detail=(
-                "Data Repository response missing harbor_ref for "
-                f"URI '{source_uri}'."
+                f"Data Repository response missing harbor_ref for URI '{source_uri}'."
             ),
         )
 
 
 def build_harbor_pull_payload(
-    resolved: dict[str, Any], source_uri: str
+    resolved: dict[str, Any], source_uri: str, backend_type: str | None = None
 ) -> dict[str, Any]:
     """Build the ``POST /models/pull`` body for a resolved Harbor artifact.
 
     Centralised so the dispatcher resolver and the /distribute route stay in
     lockstep on what gets forwarded to solar-host.
+
+    ``backend_type`` (e.g. ``"llamacpp"`` from an intent) is forwarded when
+    known so solar-host can resolve a ``repo://`` artifact to its largest
+    ``*.gguf`` instead of the directory.  Distribution does not declare a
+    backend (None) and therefore never triggers selection.
     """
     payload: dict[str, Any] = {
         "source": "harbor",
@@ -143,6 +147,7 @@ def build_harbor_pull_payload(
         "size_bytes": resolved.get("size_bytes"),
         "checksum": resolved.get("checksum"),
         "metadata": resolved.get("metadata"),
+        "backend_type": backend_type,
     }
     digest = resolved.get("checksum")
     if digest:
@@ -224,7 +229,12 @@ async def post_harbor_pull(
         )
 
 
-async def resolve_repo(source_uri: str, host_url: str, host_api_key: str) -> str:
+async def resolve_repo(
+    source_uri: str,
+    host_url: str,
+    host_api_key: str,
+    backend_type: str | None = None,
+) -> str:
     """Resolve a ``repo://`` URI end-to-end.
 
     Calls Data Repository for metadata, validates the result, then asks the
@@ -236,6 +246,10 @@ async def resolve_repo(source_uri: str, host_url: str, host_api_key: str) -> str
     selector: Data Repository is queried with ``repo://name:version`` only,
     while the full URI — subpath included — is forwarded to the host pull
     so the returned path resolves to the file.
+
+    ``backend_type`` is forwarded to the host pull: when it is ``"llamacpp"``
+    and the URI carries no subpath, the host resolves the artifact to its
+    largest ``*.gguf`` so llama-server receives a file, not a directory.
     """
     from app.model_resolvers.parser import RepoURI, parse
 
@@ -247,7 +261,7 @@ async def resolve_repo(source_uri: str, host_url: str, host_api_key: str) -> str
     resolved = await resolve_from_data_repository(repo_lookup_uri)
     validate_resolved_model(resolved, repo_lookup_uri)
 
-    payload = build_harbor_pull_payload(resolved, source_uri)
+    payload = build_harbor_pull_payload(resolved, source_uri, backend_type)
     path, _cached = await post_harbor_pull(
         payload=payload,
         host_url=host_url,

@@ -59,13 +59,17 @@ async def create_instance_on_host(
     config = instance_data.get("config", instance_data)
     model_source = config.get("model_source")
     if model_source and not config.get("model") and not config.get("model_id"):
-        resolved = await resolve(model_source, host.url, host.api_key)
+        backend_type = config.get("backend_type", "llamacpp")
+        # Forward the backend so repo:// pulls for llama.cpp resolve to the
+        # largest *.gguf in the artifact instead of the directory.
+        resolved = await resolve(
+            model_source, host.url, host.api_key, backend_type=backend_type
+        )
         # Extract filesystem path from local:// URI (scheme is 8 chars)
         if resolved.startswith("local://"):
             model_path = resolved[8:]
         else:
             model_path = resolved
-        backend_type = config.get("backend_type", "llamacpp")
         if backend_type.startswith("huggingface"):
             config["model_id"] = model_path
         else:
@@ -170,8 +174,7 @@ async def capture_instance_config(
         raise HTTPException(
             status_code=502,
             detail=(
-                f"Source host '{source_host.name}' is unreachable "
-                f"at {source_host.url}"
+                f"Source host '{source_host.name}' is unreachable at {source_host.url}"
             ),
         )
     except Exception as e:  # noqa: BLE001
@@ -183,8 +186,7 @@ async def capture_instance_config(
     raise HTTPException(
         status_code=404,
         detail=(
-            f"Instance '{instance_id}' not found on source host "
-            f"'{source_host.name}'"
+            f"Instance '{instance_id}' not found on source host '{source_host.name}'"
         ),
     )
 
@@ -385,7 +387,7 @@ async def check_no_active_training(host: Host) -> None:
                     return
 
         active_ids: list[str] = []
-        for job in (jobs if isinstance(jobs, list) else []):
+        for job in jobs if isinstance(jobs, list) else []:
             status = job.get("status") or job.get("state", "")
             if status not in TERMINAL_STATES:
                 job_id = job.get("job_id") or job.get("id", "unknown")
@@ -469,8 +471,7 @@ async def disown_source_instance(
         raise HTTPException(
             status_code=502,
             detail=(
-                f"Source host '{source_host.name}' is unreachable "
-                f"at {source_host.url}"
+                f"Source host '{source_host.name}' is unreachable at {source_host.url}"
             ),
         )
     except Exception as e:  # noqa: BLE001
@@ -542,8 +543,7 @@ async def stop_source_instance(source_host: Host, instance_id: str) -> dict[str,
         raise HTTPException(
             status_code=502,
             detail=(
-                f"Source host '{source_host.name}' is unreachable "
-                f"at {source_host.url}"
+                f"Source host '{source_host.name}' is unreachable at {source_host.url}"
             ),
         )
     except Exception as e:  # noqa: BLE001

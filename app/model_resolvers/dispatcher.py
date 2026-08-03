@@ -3,10 +3,20 @@ from .huggingface import resolve_huggingface
 from .repo import resolve_repo
 
 
-async def resolve(uri_str: str, host_url: str, host_api_key: str) -> str:
+async def resolve(
+    uri_str: str,
+    host_url: str,
+    host_api_key: str,
+    backend_type: str | None = None,
+) -> str:
     """
     Parses a URI and dispatches to the correct resolver.
     Returns a resolved local:// URI.
+
+    ``backend_type`` is forwarded to the host pull for ``repo://`` URIs so
+    llama.cpp artifacts resolve to their largest ``*.gguf`` (the host needs
+    a file, not a directory).  ``local://`` and ``huggingface://`` are never
+    affected.
     """
     parsed = parse(uri_str)
 
@@ -18,7 +28,7 @@ async def resolve(uri_str: str, host_url: str, host_api_key: str) -> str:
         return await resolve_huggingface(parsed, uri_str, host_url, host_api_key)
 
     elif isinstance(parsed, RepoURI):
-        return await resolve_repo(uri_str, host_url, host_api_key)
+        return await resolve_repo(uri_str, host_url, host_api_key, backend_type)
 
     else:
         # Should not happen if parser is correct

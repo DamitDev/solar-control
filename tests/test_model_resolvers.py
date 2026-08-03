@@ -270,6 +270,65 @@ async def test_resolve_repo_success(repo_settings):
 
 
 @pytest.mark.anyio
+async def test_resolve_repo_forwards_backend_type(repo_settings):
+    """llamacpp backend is forwarded in the pull payload for GGUF selection."""
+    uri = "repo://iris-osl:v3"
+    host_url = "http://host:8000"
+
+    with (
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = _repo_resolve_payload()
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        pull_resp = AsyncMock()
+        pull_resp.status = 200
+        pull_resp.json.return_value = {
+            "path": "/opt/solar/models/repo--iris-osl--v3/model.gguf",
+            "cached": True,
+        }
+        mock_post.return_value.__aenter__.return_value = pull_resp
+
+        resolved = await resolve(uri, host_url, "key", backend_type="llamacpp")
+
+        assert resolved == "local:///opt/solar/models/repo--iris-osl--v3/model.gguf"
+        _, post_kwargs = mock_post.call_args
+        assert post_kwargs["json"]["backend_type"] == "llamacpp"
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_default_backend_type_is_none(repo_settings):
+    """No backend declared -> payload carries None (no GGUF selection)."""
+    uri = "repo://iris-osl:v3"
+    host_url = "http://host:8000"
+
+    with (
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = _repo_resolve_payload()
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        pull_resp = AsyncMock()
+        pull_resp.status = 200
+        pull_resp.json.return_value = {
+            "path": "/opt/solar/models/repo--iris-osl--v3",
+            "cached": True,
+        }
+        mock_post.return_value.__aenter__.return_value = pull_resp
+
+        await resolve(uri, host_url, "key")
+
+        _, post_kwargs = mock_post.call_args
+        assert post_kwargs["json"]["backend_type"] is None
+
+
+@pytest.mark.anyio
 async def test_resolve_repo_invalid_missing_version():
     # Dispatcher calls parse first, which raises 400
     uri = "repo://iris-osl"
