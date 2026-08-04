@@ -6,6 +6,8 @@ from .host import (
     AggregatedResourceResponse as AggregatedResourceResponse,
     Host as Host,
     HostCreate as HostCreate,
+    HostInstanceSummary as HostInstanceSummary,
+    HostReservationSummary as HostReservationSummary,
     HostResourceSnapshot as HostResourceSnapshot,
     HostResponse as HostResponse,
     HostStatus as HostStatus,

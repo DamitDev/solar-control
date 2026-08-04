@@ -154,7 +154,7 @@ Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending un
 
 ### Resource Queries
 
-- `GET /api/resources` - Aggregated cluster-wide view of host capacity, workloads, and reservations. Supports filters: `role`, `gpu_type`, `min_available_vram_gb`, `min_available_ram_gb`
+- `GET /api/resources` - Aggregated cluster-wide view of host capacity, workloads, and reservations. Supports filters: `role`, `gpu_type`, `min_available_vram_gb`, `min_available_ram_gb`. Each host entry includes finer details for the resource dashboard (U-004): `instances` (inference workload list with aliases), `reservations` (per-reservation details with owner `job_id`, requested vs actual), and `*_training_used_gb` (the portion of in-use capacity consumed by active training job steps)
 
 ### Instance Proxy (via solar-control to host)
 

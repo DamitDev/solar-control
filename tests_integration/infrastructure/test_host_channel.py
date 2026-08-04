@@ -113,6 +113,85 @@ async def test_instances_update_populates_redis(
         description="instance running in control's view",
     )
 
+    # The finer-detail snapshot lists the instance with its alias (U-004).
+    resp = await http_control.get("/api/resources")
+    assert resp.status_code == 200, resp.text
+    snap = next(h for h in resp.json()["hosts"] if h["host_id"] == host_a["id"])
+    assert any(
+        inst.get("id") == instance_id and inst.get("alias") == alias
+        for inst in snap.get("instances", [])
+    )
+
+
+async def test_resources_snapshot_exposes_reservation_details(
+    http_control, http_host, clean_state
+):
+    """Per-reservation details (owner job_id, status, requested vs actual)
+    pass through solar-host -> control -> /api/resources (U-004)."""
+    hosts = {h["name"]: h for h in (await http_control.get("/api/hosts")).json()}
+    host_a = hosts["host-a"]
+
+    # Baseline: every reachable host entry exposes the finer-detail fields.
+    resp = await http_control.get("/api/resources")
+    assert resp.status_code == 200, resp.text
+    snap = next(h for h in resp.json()["hosts"] if h["host_id"] == host_a["id"])
+    assert snap["reachable"] is True
+    assert isinstance(snap["instances"], list)
+    assert isinstance(snap["reservations"], list)
+    for key in (
+        "vram_training_used_gb",
+        "ram_training_used_gb",
+        "disk_training_used_gb",
+    ):
+        assert key in snap
+
+    # Create a reservation directly on the host (bypasses the S-038
+    # coordinator; a pending reservation has no actuals yet).
+    job_id = f"job-{uuid.uuid4().hex[:8]}"
+    resp = await http_host.post(
+        "/resources/reservations",
+        json={
+            "job_id": job_id,
+            "requester": "integration-test",
+            "workload_type": "training",
+            "vram_gb": 0.0,
+            "ram_gb": 1.0,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    reservation = resp.json()
+
+    async def visible() -> bool:
+        r = await http_control.get("/api/resources")
+        if r.status_code != 200:
+            return False
+        snap = next(
+            (h for h in r.json()["hosts"] if h["host_id"] == host_a["id"]),
+            None,
+        )
+        if not snap:
+            return False
+        return any(
+            x.get("id") == reservation["id"] for x in snap.get("reservations", [])
+        )
+
+    await wait_for(
+        visible,
+        timeout=60.0,
+        interval=0.5,
+        description="reservation visible in /api/resources",
+    )
+
+    resp = await http_control.get("/api/resources")
+    snap = next(h for h in resp.json()["hosts"] if h["host_id"] == host_a["id"])
+    entry = next(x for x in snap["reservations"] if x["id"] == reservation["id"])
+    assert entry["job_id"] == job_id
+    assert entry["status"] == "pending"
+    assert entry["workload_type"] == "training"
+    assert entry["ram_gb"] == 1.0
+    assert entry["actual_ram_gb"] is None
+    assert snap["reservation_count"] >= 1
+
 
 async def _running(http_control, host_id: str, instance_id: str) -> bool:
     return await _instance_status(http_control, host_id, instance_id) == "running"

@@ -11,7 +11,13 @@ import aiohttp
 from fastapi import APIRouter, HTTPException, Query
 
 from app.database.hosts import host_db
-from app.models import Host, HostResourceSnapshot, AggregatedResourceResponse
+from app.models import (
+    AggregatedResourceResponse,
+    Host,
+    HostInstanceSummary,
+    HostReservationSummary,
+    HostResourceSnapshot,
+)
 from app.redis_state import host_store
 from app.services.host_status import get_host_active_jobs
 
@@ -53,6 +59,18 @@ async def _fetch_host_resource_snapshot(
         base.running_instance_count = sum(
             1 for i in instances if i.get("status") == "running"
         )
+        base.instances = [
+            HostInstanceSummary(
+                id=i["id"],
+                alias=i.get("alias"),
+                status=i.get("status"),
+                backend_type=i.get("backend_type"),
+                port=i.get("port"),
+                supported_endpoints=list(i.get("supported_endpoints") or []),
+            )
+            for i in instances
+            if i.get("id")
+        ]
     except Exception:
         logger.warning(
             "Failed to fetch instances from Redis for host %s",
@@ -106,7 +124,7 @@ async def _fetch_host_resource_snapshot(
         setattr(base, f"{dim_name}_reported_used_gb", dim.get("reported_used_gb"))
         setattr(base, f"{dim_name}_available_gb", dim.get("available_gb"))
 
-    # Merge reservation summary
+    # Merge reservation details + totals
     reservations = data.get("reservations", [])
     base.reservation_count = len(reservations)
     base.reservation_vram_total_gb = sum(
@@ -115,6 +133,48 @@ async def _fetch_host_resource_snapshot(
     base.reservation_ram_total_gb = sum(float(r.get("ram_gb", 0)) for r in reservations)
     base.reservation_disk_total_gb = sum(
         float(r.get("disk_gb") or 0) for r in reservations
+    )
+    base.reservations = [
+        HostReservationSummary(
+            id=r["id"],
+            job_id=str(r.get("job_id", "")),
+            workload_type=str(r.get("workload_type", "training")),
+            status=str(r.get("status", "pending")),
+            vram_gb=float(r.get("vram_gb") or 0),
+            ram_gb=float(r.get("ram_gb") or 0),
+            disk_gb=float(r["disk_gb"]) if r.get("disk_gb") is not None else None,
+            actual_vram_gb=(
+                float(r["actual_vram_gb"])
+                if r.get("actual_vram_gb") is not None
+                else None
+            ),
+            actual_ram_gb=(
+                float(r["actual_ram_gb"])
+                if r.get("actual_ram_gb") is not None
+                else None
+            ),
+            actual_disk_gb=(
+                float(r["actual_disk_gb"])
+                if r.get("actual_disk_gb") is not None
+                else None
+            ),
+            expires_at=r.get("expires_at"),
+        )
+        for r in reservations
+        if r.get("id")
+    ]
+
+    # Active training job-step consumption: Σ actual usage of running
+    # reservations (pending reservations have no actuals yet — their full
+    # requested amount is already captured in reserved_headroom).
+    base.vram_training_used_gb = sum(
+        float(r.get("actual_vram_gb") or 0) for r in reservations
+    )
+    base.ram_training_used_gb = sum(
+        float(r.get("actual_ram_gb") or 0) for r in reservations
+    )
+    base.disk_training_used_gb = sum(
+        float(r.get("actual_disk_gb") or 0) for r in reservations
     )
 
     return base
@@ -148,6 +208,13 @@ async def get_resources(
     ``reserved_headroom = Σ max(reserved − actual, 0)`` per reservation.
     This correctly implements ``effective = max(actual, requested)`` —
     real consumption is never double-counted.
+
+    Per-host finer details (U-004): ``instances`` lists the inference
+    workloads (with aliases) behind ``system_used``; ``reservations``
+    carries per-reservation details (owner ``job_id``, requested vs
+    actual per dimension); ``*_training_used_gb`` is the portion of
+    ``system_used`` consumed by active training job steps (Σ actuals of
+    running reservations).
     """
     if isinstance(host_id, str):
         host = await host_db.get_host(host_id)

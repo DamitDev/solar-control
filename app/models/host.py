@@ -132,6 +132,44 @@ class ActiveJobSummary(BaseModel):
     )
 
 
+class HostInstanceSummary(BaseModel):
+    """Lightweight view of an inference instance on a host (S-035 detail).
+
+    Mirrors the WS ``instances_update`` shape cached in Redis, so the
+    WebUI can list instance aliases behind the "in use" bar segment
+    without a second API call.
+    """
+
+    id: str
+    alias: str | None = None
+    status: str | None = None
+    backend_type: str | None = None
+    port: int | None = None
+    supported_endpoints: list[str] = Field(default_factory=list)
+
+
+class HostReservationSummary(BaseModel):
+    """Per-reservation detail passed through from solar-host (S-035 detail).
+
+    Mirrors solar-host's ``ReservationView`` so consumers can attribute
+    reserved-but-not-running capacity to its owner (``job_id``) and
+    distinguish pending reservations from running ones. ``actual_*`` is
+    set for running reservations only (``None`` while pending).
+    """
+
+    id: str
+    job_id: str
+    workload_type: str
+    status: str = "pending"
+    vram_gb: float = 0.0
+    ram_gb: float = 0.0
+    disk_gb: float | None = None
+    actual_vram_gb: float | None = None
+    actual_ram_gb: float | None = None
+    actual_disk_gb: float | None = None
+    expires_at: str | None = None
+
+
 class HostResourceSnapshot(BaseModel):
     """Per-host resource snapshot in the aggregated cluster view (S-035).
 
@@ -141,6 +179,14 @@ class HostResourceSnapshot(BaseModel):
     Resource availability follows S-034 semantics:
     ``available = total - (system_used + reserved_headroom)`` where
     ``reserved_headroom = Σ max(reserved − actual, 0)`` per reservation.
+
+    Fine-grained breakdown (U-004): ``instances`` lists the inference
+    workloads behind ``system_used``, ``reservations`` carries the
+    per-reservation details (owner ``job_id``, requested vs actual), and
+    ``*_training_used_gb`` is the portion of ``system_used`` consumed by
+    active training job steps (Σ actuals of running reservations). The
+    remaining in-use capacity (``system_used - *_training_used_gb``) is
+    inference instances + OS.
     """
 
     host_id: str
@@ -184,6 +230,9 @@ class HostResourceSnapshot(BaseModel):
     instance_count: int = 0
     running_instance_count: int = 0
 
+    # Inference workload details (U-004 — from Redis instance cache)
+    instances: list[HostInstanceSummary] = Field(default_factory=list)
+
     # Active job workloads (from jobs table — training pipelines etc.)
     active_jobs: list[ActiveJobSummary] = Field(
         default_factory=list,
@@ -195,6 +244,14 @@ class HostResourceSnapshot(BaseModel):
     reservation_vram_total_gb: float = 0.0
     reservation_ram_total_gb: float = 0.0
     reservation_disk_total_gb: float = 0.0
+
+    # Per-reservation details (U-004 — passed through from solar-host)
+    reservations: list[HostReservationSummary] = Field(default_factory=list)
+
+    # Active training job-step consumption (Σ actuals of running reservations)
+    vram_training_used_gb: float = 0.0
+    ram_training_used_gb: float = 0.0
+    disk_training_used_gb: float = 0.0
 
     # Timestamps
     snapshot_timestamp: str | None = None

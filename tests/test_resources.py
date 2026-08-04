@@ -91,7 +91,21 @@ def live_resource_payload():
                 "vram_gb": 20.0,
                 "ram_gb": 64.0,
                 "disk_gb": 50.0,
-            }
+                "expires_at": "2026-08-05T00:00:00Z",
+            },
+            {
+                "id": "res-2",
+                "job_id": "job-2",
+                "workload_type": "training",
+                "status": "running",
+                "vram_gb": 10.0,
+                "ram_gb": 32.0,
+                "disk_gb": 25.0,
+                "actual_vram_gb": 6.0,
+                "actual_ram_gb": 16.0,
+                "actual_disk_gb": 10.0,
+                "expires_at": "2026-08-06T00:00:00Z",
+            },
         ],
     }
 
@@ -110,7 +124,14 @@ async def test_fetch_host_resource_snapshot_success(
     ):
         mock_store.get_host_instances = AsyncMock(
             return_value=[
-                {"id": "inst-1", "status": "running"},
+                {
+                    "id": "inst-1",
+                    "alias": "llama-3-8b",
+                    "status": "running",
+                    "backend_type": "llamacpp",
+                    "port": 8081,
+                    "supported_endpoints": ["chat", "completion"],
+                },
                 {"id": "inst-2", "status": "stopped"},
             ]
         )
@@ -135,11 +156,120 @@ async def test_fetch_host_resource_snapshot_success(
         assert snap.disk_available_gb == 750.0
         assert snap.instance_count == 2
         assert snap.running_instance_count == 1
-        assert snap.reservation_count == 1
-        assert snap.reservation_vram_total_gb == 20.0
-        assert snap.reservation_ram_total_gb == 64.0
-        assert snap.reservation_disk_total_gb == 50.0
+        assert snap.reservation_count == 2
+        assert snap.reservation_vram_total_gb == 30.0
+        assert snap.reservation_ram_total_gb == 96.0
+        assert snap.reservation_disk_total_gb == 75.0
         assert snap.active_jobs == []
+
+        # Instance details passed through from the Redis cache (U-004)
+        assert len(snap.instances) == 2
+        first = snap.instances[0]
+        assert first.id == "inst-1"
+        assert first.alias == "llama-3-8b"
+        assert first.status == "running"
+        assert first.backend_type == "llamacpp"
+        assert first.port == 8081
+        assert first.supported_endpoints == ["chat", "completion"]
+        assert snap.instances[1].alias is None
+
+        # Reservation details passed through from solar-host (U-004)
+        assert len(snap.reservations) == 2
+        pending = snap.reservations[0]
+        assert pending.id == "res-1"
+        assert pending.job_id == "job-1"
+        assert pending.status == "pending"
+        assert pending.vram_gb == 20.0
+        assert pending.actual_vram_gb is None
+        running = snap.reservations[1]
+        assert running.job_id == "job-2"
+        assert running.status == "running"
+        assert running.actual_vram_gb == 6.0
+        assert running.actual_ram_gb == 16.0
+        assert running.actual_disk_gb == 10.0
+        assert running.expires_at == "2026-08-06T00:00:00Z"
+
+        # Training usage = Σ actuals of running reservations; pending
+        # reservations contribute 0 (their requested amount is headroom).
+        assert snap.vram_training_used_gb == 6.0
+        assert snap.ram_training_used_gb == 16.0
+        assert snap.disk_training_used_gb == 10.0
+
+
+@pytest.mark.anyio
+async def test_fetch_host_resource_snapshot_training_usage(mock_host_online):
+    """Pending reservations contribute 0 to training usage; running ones
+    contribute their actuals (S-034 effective semantics, U-004)."""
+    payload = {
+        "vram": {"total_gb": 80.0, "system_used_gb": 30.0},
+        "ram": {"total_gb": 256.0, "system_used_gb": 64.0},
+        "disk": {"total_gb": 1000.0, "system_used_gb": 200.0},
+        "reservations": [
+            {
+                "id": "res-pending",
+                "job_id": "job-p",
+                "status": "pending",
+                "vram_gb": 20.0,
+                "ram_gb": 40.0,
+                "disk_gb": 50.0,
+            },
+            {
+                "id": "res-running",
+                "job_id": "job-r",
+                "status": "running",
+                "vram_gb": 10.0,
+                "ram_gb": 20.0,
+                "disk_gb": 25.0,
+                "actual_vram_gb": 7.0,
+                "actual_ram_gb": 0.0,
+                # no actual_disk_gb: treated as 0
+            },
+        ],
+    }
+    with (
+        patch("app.routes.management.resources.host_store") as mock_store,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
+        mock_store.get_host_instances = AsyncMock(return_value=[])
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=payload)
+        mock_get.return_value.__aenter__.return_value = mock_resp
+
+        snap = await _fetch_host_resource_snapshot(mock_host_online)
+
+    assert snap.reservation_count == 2
+    assert snap.vram_training_used_gb == 7.0
+    assert snap.ram_training_used_gb == 0.0
+    assert snap.disk_training_used_gb == 0.0
+    pending = snap.reservations[0]
+    assert pending.job_id == "job-p"
+    assert pending.actual_vram_gb is None
+
+
+@pytest.mark.anyio
+async def test_fetch_host_resource_snapshot_no_reservations(mock_host_online):
+    """A host payload without a reservations key yields empty details."""
+    payload = {
+        "vram": {"total_gb": 80.0, "system_used_gb": 10.0},
+    }
+    with (
+        patch("app.routes.management.resources.host_store") as mock_store,
+        patch("aiohttp.ClientSession.get") as mock_get,
+    ):
+        mock_store.get_host_instances = AsyncMock(return_value=[])
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=payload)
+        mock_get.return_value.__aenter__.return_value = mock_resp
+
+        snap = await _fetch_host_resource_snapshot(mock_host_online)
+
+    assert snap.reservation_count == 0
+    assert snap.reservations == []
+    assert snap.vram_training_used_gb == 0.0
+    assert snap.ram_training_used_gb == 0.0
+    assert snap.disk_training_used_gb == 0.0
 
 
 @pytest.mark.anyio
